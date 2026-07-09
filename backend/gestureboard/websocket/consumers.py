@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from channels.generic.websocket import AsyncWebsocketConsumer
+from gestureboard.services.websocket_manager import websocket_manager
 
 
 class GestureConsumer(AsyncWebsocketConsumer):
@@ -20,6 +21,8 @@ class GestureConsumer(AsyncWebsocketConsumer):
 
     async def connect(self) -> None:
         await self.accept()
+
+        await websocket_manager.register(self)
 
         await self.send_json(
             {
@@ -32,10 +35,7 @@ class GestureConsumer(AsyncWebsocketConsumer):
         )
 
     async def disconnect(self, close_code: int) -> None:
-        """
-        Cleanup when the client disconnects.
-        """
-        return
+        await websocket_manager.unregister(self)
 
     async def receive(
         self,
@@ -65,13 +65,15 @@ class GestureConsumer(AsyncWebsocketConsumer):
         message_type = payload.get("type")
 
         if message_type == "ping":
-            await self.send_json(
+            await websocket_manager.send(
+                self,
                 {
                     "type": "pong",
+                    "connections": websocket_manager.total_connections,
                     "timestamp": self.timestamp(),
-                }
+                },
             )
-            return
+        return
 
         await self.send_json(
             {
