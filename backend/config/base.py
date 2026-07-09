@@ -44,6 +44,7 @@ DJANGO_APPS = [
 ]
 
 THIRD_PARTY_APPS = [
+    "daphne",
     "channels",
 ]
 
@@ -81,7 +82,7 @@ TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
         "DIRS": [
-            BASE_DIR / "templates",
+            BASE_DIR / "resources" / "templates",
         ],
         "APP_DIRS": True,
         "OPTIONS": {
@@ -101,6 +102,12 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 
 ASGI_APPLICATION = "config.asgi.application"
+
+LOGIN_URL = "/admin/login/"
+
+LOGIN_REDIRECT_URL = "/"
+
+LOGOUT_REDIRECT_URL = "/"
 
 # =============================================================================
 # Database
@@ -146,6 +153,8 @@ USE_I18N = True
 
 USE_TZ = True
 
+SITE_ID = 1
+
 # =============================================================================
 # Static Files
 # =============================================================================
@@ -155,7 +164,7 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
 STATICFILES_DIRS = [
-    BASE_DIR / "static",
+    BASE_DIR / "resources" / "static",
 ]
 
 # =============================================================================
@@ -164,7 +173,7 @@ STATICFILES_DIRS = [
 
 MEDIA_URL = "media/"
 
-MEDIA_ROOT = BASE_DIR / "media"
+MEDIA_ROOT = BASE_DIR / "resources" / "media"
 
 # =============================================================================
 # Channels
@@ -177,7 +186,47 @@ CHANNEL_LAYERS = {
 }
 
 # =============================================================================
+# Session settings
+# =============================================================================
+
+SESSION_ENGINE = "django.contrib.sessions.backends.db"
+
+SESSION_COOKIE_HTTPONLY = True
+
+CSRF_COOKIE_HTTPONLY = True
+
+# =============================================================================
+# Logging
+# =============================================================================
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "INFO",
+    },
+}
+
+# =============================================================================
+# Security
+# =============================================================================
+
+SECURE_CONTENT_TYPE_NOSNIFF = True
+
+X_FRAME_OPTIONS = "DENY"
+
+# =============================================================================
 # Default Primary Key
 # =============================================================================
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# =============================================================================
+# End of Settings
+# =============================================================================
