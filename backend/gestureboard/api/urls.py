@@ -1,0 +1,5 @@
+"""
+GestureBoard API URLs
+"""
+
+urlpatterns = []
