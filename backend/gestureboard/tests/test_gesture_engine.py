@@ -23,6 +23,8 @@ from gestureboard.services.gesture_engine import (
     GestureEngineError,
     GestureObservation,
     GestureRepeatPolicy,
+    NeutralGestureObservation,
+    NeutralObservationReason,
 )
 from gestureboard.services.keyboard_controller import (
     KeyboardAction,
@@ -375,6 +377,94 @@ class CooldownAndRepeatTests(SimpleTestCase):
         held = engine.process(observation(GestureLabel.PEACE), timestamp=10)
 
         self.assertEqual(held.decision, GestureEngineDecision.HELD_SUPPRESSED)
+
+
+class NeutralGestureObservationTests(SimpleTestCase):
+    def setUp(self) -> None:
+        self.dispatcher = FakeDispatcher({GestureLabel.POINT})
+        self.engine = GestureEngine(
+            self.dispatcher,
+            GestureEngineConfig(
+                activation_frames=2,
+                release_frames=2,
+                cooldown_seconds=0,
+            ),
+        )
+
+    def test_inactive_no_hand_is_preserved_and_never_dispatched(self) -> None:
+        neutral = NeutralGestureObservation()
+
+        result = self.engine.process(neutral, timestamp=0)
+
+        self.assertIs(result.observation, neutral)
+        self.assertEqual(result.decision, GestureEngineDecision.NO_HAND)
+        self.assertIsNone(result.prediction)
+        self.assertIsNone(result.detection_confidence)
+        self.assertEqual(self.dispatcher.predictions, [])
+
+    def test_no_hand_resets_accumulating_candidate(self) -> None:
+        self.engine.process(observation(GestureLabel.POINT), timestamp=0)
+        result = self.engine.process(NeutralGestureObservation(), timestamp=1)
+
+        self.assertEqual(result.decision, GestureEngineDecision.NO_HAND)
+        self.assertIsNone(result.candidate_label)
+        self.assertEqual(result.candidate_frame_count, 0)
+
+    def test_no_hand_contributes_to_release_without_immediate_rearm(self) -> None:
+        self._activate()
+        partial = self.engine.process(NeutralGestureObservation(), timestamp=2)
+        returned = self.engine.process(observation(GestureLabel.POINT), timestamp=3)
+
+        self.assertEqual(partial.decision, GestureEngineDecision.RELEASE_ACCUMULATING)
+        self.assertEqual(returned.decision, GestureEngineDecision.HELD_SUPPRESSED)
+        self.assertEqual(len(self.dispatcher.predictions), 1)
+
+    def test_full_no_hand_release_allows_same_gesture_again(self) -> None:
+        self._activate()
+        self.engine.process(NeutralGestureObservation(), timestamp=2)
+        released = self.engine.process(NeutralGestureObservation(), timestamp=3)
+        self.engine.process(observation(GestureLabel.POINT), timestamp=4)
+        dispatched = self.engine.process(observation(GestureLabel.POINT), timestamp=5)
+
+        self.assertEqual(released.decision, GestureEngineDecision.RELEASED)
+        self.assertEqual(dispatched.decision, GestureEngineDecision.DISPATCHED)
+        self.assertEqual(len(self.dispatcher.predictions), 2)
+
+    def test_full_no_hand_release_resets_repeat_timing(self) -> None:
+        engine = GestureEngine(
+            self.dispatcher,
+            GestureEngineConfig(
+                activation_frames=2,
+                release_frames=2,
+                cooldown_seconds=0,
+                repeat_policies={GestureLabel.POINT: GestureRepeatPolicy(2, 1)},
+            ),
+        )
+        engine.process(observation(GestureLabel.POINT), timestamp=0)
+        engine.process(observation(GestureLabel.POINT), timestamp=1)
+        engine.process(NeutralGestureObservation(), timestamp=2)
+        engine.process(NeutralGestureObservation(), timestamp=3)
+        engine.process(observation(GestureLabel.POINT), timestamp=4)
+        engine.process(observation(GestureLabel.POINT), timestamp=5)
+        waiting = engine.process(observation(GestureLabel.POINT), timestamp=6)
+
+        self.assertEqual(waiting.decision, GestureEngineDecision.REPEAT_WAITING)
+
+    def test_neutral_reason_is_typed_and_immutable(self) -> None:
+        neutral = NeutralGestureObservation(NeutralObservationReason.NO_HAND_DETECTED)
+        with self.assertRaises(FrozenInstanceError):
+            neutral.reason = NeutralObservationReason.NO_HAND_DETECTED
+        with self.assertRaises(GestureEngineError):
+            NeutralGestureObservation("NO_HAND_DETECTED")
+
+    def test_timestamp_validation_applies_to_neutral_input(self) -> None:
+        self.engine.process(NeutralGestureObservation(), timestamp=2)
+        with self.assertRaisesRegex(GestureEngineError, "earlier"):
+            self.engine.process(NeutralGestureObservation(), timestamp=1)
+
+    def _activate(self) -> None:
+        self.engine.process(observation(GestureLabel.POINT), timestamp=0)
+        self.engine.process(observation(GestureLabel.POINT), timestamp=1)
 
 
 class TimestampAndLifecycleTests(SimpleTestCase):

@@ -49,6 +49,28 @@ class GestureObservation:
             )
 
 
+class NeutralObservationReason(StrEnum):
+    """Explicit reasons an engine input contains no gesture prediction."""
+
+    NO_HAND_DETECTED = "NO_HAND_DETECTED"
+
+
+@dataclass(frozen=True, slots=True)
+class NeutralGestureObservation:
+    """A semantically neutral temporal input without fabricated features."""
+
+    reason: NeutralObservationReason = NeutralObservationReason.NO_HAND_DETECTED
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.reason, NeutralObservationReason):
+            raise GestureEngineError(
+                "NeutralGestureObservation.reason must be a NeutralObservationReason."
+            )
+
+
+GestureEngineInput = GestureObservation | NeutralGestureObservation
+
+
 @dataclass(frozen=True, slots=True)
 class GestureRepeatPolicy:
     """Conservative repeat timing for one explicitly configured label."""
@@ -112,6 +134,7 @@ class GestureEngineDecision(StrEnum):
 
     LOW_CONFIDENCE = "LOW_CONFIDENCE"
     UNKNOWN = "UNKNOWN"
+    NO_HAND = "NO_HAND"
     ACCUMULATING = "ACCUMULATING"
     ACTIVATED = "ACTIVATED"
     DISPATCHED = "DISPATCHED"
@@ -128,7 +151,7 @@ class GestureEngineDecision(StrEnum):
 class GestureEngineResult:
     """Immutable diagnostic snapshot after processing one observation."""
 
-    observation: GestureObservation
+    observation: GestureEngineInput
     decision: GestureEngineDecision
     candidate_label: GestureLabel | None
     candidate_frame_count: int
@@ -142,12 +165,16 @@ class GestureEngineResult:
         return bool(self.dispatch_result and self.dispatch_result.executed)
 
     @property
-    def prediction(self) -> GesturePrediction:
-        return self.observation.prediction
+    def prediction(self) -> GesturePrediction | None:
+        if isinstance(self.observation, GestureObservation):
+            return self.observation.prediction
+        return None
 
     @property
-    def detection_confidence(self) -> float:
-        return self.observation.detection_confidence
+    def detection_confidence(self) -> float | None:
+        if isinstance(self.observation, GestureObservation):
+            return self.observation.detection_confidence
+        return None
 
 
 class GestureEngine:
@@ -175,7 +202,7 @@ class GestureEngine:
 
     def process(
         self,
-        observation: GestureObservation,
+        observation: GestureEngineInput,
         *,
         timestamp: float | None = None,
     ) -> GestureEngineResult:
@@ -183,10 +210,19 @@ class GestureEngine:
 
         if self._closed:
             raise GestureEngineError("Gesture engine has been closed.")
-        if not isinstance(observation, GestureObservation):
-            raise GestureEngineError("process() requires a GestureObservation.")
+        if not isinstance(observation, (GestureObservation, NeutralGestureObservation)):
+            raise GestureEngineError(
+                "process() requires a GestureObservation or NeutralGestureObservation."
+            )
         now = self._timestamp(timestamp)
         self._last_timestamp = now
+
+        if isinstance(observation, NeutralGestureObservation):
+            return self._process_neutral(
+                observation,
+                now,
+                GestureEngineDecision.NO_HAND,
+            )
 
         label = observation.prediction.label
         neutral_decision: GestureEngineDecision | None = None
@@ -201,7 +237,7 @@ class GestureEngine:
 
     def _process_neutral(
         self,
-        observation: GestureObservation,
+        observation: GestureEngineInput,
         now: float,
         neutral_decision: GestureEngineDecision,
     ) -> GestureEngineResult:
@@ -331,7 +367,7 @@ class GestureEngine:
 
     def _result(
         self,
-        observation: GestureObservation,
+        observation: GestureEngineInput,
         now: float,
         decision: GestureEngineDecision,
         dispatch_result: DispatchResult | None = None,
