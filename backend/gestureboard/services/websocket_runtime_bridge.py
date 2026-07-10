@@ -1,0 +1,414 @@
+"""Transport-neutral decoding and serialization bridge for gesture frames."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from enum import StrEnum
+from types import TracebackType
+from typing import Any, Protocol
+
+import cv2
+import numpy as np
+
+from .gesture_engine import GestureObservation
+from .gesture_runtime import GestureRuntime, GestureRuntimeResult
+
+
+class WebSocketRuntimeBridgeStage(StrEnum):
+    PAYLOAD_VALIDATION = "payload validation"
+    FRAME_DECODING = "frame decoding"
+    RUNTIME_PROCESSING = "runtime processing"
+    RESULT_SERIALISATION = "result serialisation"
+    RESET = "reset"
+    LIFECYCLE = "lifecycle"
+
+
+class WebSocketProtocolMessageType(StrEnum):
+    GESTURE_RESULT = "gesture.result"
+    ERROR = "error"
+    CONNECTION_READY = "connection.ready"
+    PING = "ping"
+    PONG = "pong"
+    RUNTIME_RESET = "runtime.reset"
+    RUNTIME_RESET_ACK = "runtime.reset.ack"
+
+
+class WebSocketProtocolErrorCode(StrEnum):
+    INVALID_MESSAGE = "invalid_message"
+    INVALID_JSON = "invalid_json"
+    UNSUPPORTED_MESSAGE = "unsupported_message"
+    INVALID_FRAME = "invalid_frame"
+    FRAME_TOO_LARGE = "frame_too_large"
+    RUNTIME_FAILURE = "runtime_failure"
+    RESET_FAILURE = "reset_failure"
+    INTERNAL_ERROR = "internal_error"
+
+
+class WebSocketRuntimeBridgeError(RuntimeError):
+    """Typed bridge failure safe for conversion to a protocol error."""
+
+    def __init__(
+        self,
+        stage: WebSocketRuntimeBridgeStage,
+        code: WebSocketProtocolErrorCode,
+        message: str,
+    ) -> None:
+        self.stage = stage
+        self.code = code
+        self.public_message = message
+        super().__init__(f"{stage.value}: {message}")
+
+
+@dataclass(frozen=True, slots=True)
+class WebSocketRuntimeBridgeConfig:
+    protocol_version: int = 1
+    maximum_encoded_frame_size: int = 5 * 1024 * 1024
+    expose_diagnostic_errors: bool = False
+    maximum_decoded_width: int | None = None
+    maximum_decoded_height: int | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.protocol_version, bool) or self.protocol_version != 1:
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.PAYLOAD_VALIDATION,
+                WebSocketProtocolErrorCode.INVALID_MESSAGE,
+                "protocol_version must be 1.",
+            )
+        if (
+            isinstance(self.maximum_encoded_frame_size, bool)
+            or not isinstance(self.maximum_encoded_frame_size, int)
+            or self.maximum_encoded_frame_size < 1
+        ):
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.PAYLOAD_VALIDATION,
+                WebSocketProtocolErrorCode.INVALID_MESSAGE,
+                "maximum_encoded_frame_size must be a positive integer.",
+            )
+        if not isinstance(self.expose_diagnostic_errors, bool):
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.PAYLOAD_VALIDATION,
+                WebSocketProtocolErrorCode.INVALID_MESSAGE,
+                "expose_diagnostic_errors must be a bool.",
+            )
+        for name, value in (
+            ("maximum_decoded_width", self.maximum_decoded_width),
+            ("maximum_decoded_height", self.maximum_decoded_height),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+            ):
+                raise WebSocketRuntimeBridgeError(
+                    WebSocketRuntimeBridgeStage.FRAME_DECODING,
+                    WebSocketProtocolErrorCode.INVALID_FRAME,
+                    f"{name} must be a positive integer or None.",
+                )
+
+
+class FrameDecoder(Protocol):
+    def decode(self, payload: bytes) -> np.ndarray: ...
+
+
+class OpenCVFrameDecoder:
+    """Decode JPEG/PNG-style encoded bytes into a three-channel BGR frame."""
+
+    def __init__(
+        self,
+        maximum_width: int | None = None,
+        maximum_height: int | None = None,
+    ) -> None:
+        for name, value in (
+            ("maximum_width", maximum_width),
+            ("maximum_height", maximum_height),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+            ):
+                raise WebSocketRuntimeBridgeError(
+                    WebSocketRuntimeBridgeStage.FRAME_DECODING,
+                    WebSocketProtocolErrorCode.INVALID_FRAME,
+                    f"{name} must be a positive integer or None.",
+                )
+        self.maximum_width = maximum_width
+        self.maximum_height = maximum_height
+
+    def decode(self, payload: bytes) -> np.ndarray:
+        is_jpeg = payload.startswith(b"\xff\xd8\xff")
+        is_png = payload.startswith(b"\x89PNG\r\n\x1a\n")
+        if not (is_jpeg or is_png):
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.FRAME_DECODING,
+                WebSocketProtocolErrorCode.INVALID_FRAME,
+                "Encoded frame must be a JPEG or PNG image.",
+            )
+        try:
+            encoded = np.frombuffer(payload, dtype=np.uint8)
+            frame = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        except Exception as error:
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.FRAME_DECODING,
+                WebSocketProtocolErrorCode.INVALID_FRAME,
+                "Encoded frame could not be decoded.",
+            ) from error
+        if frame is None:
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.FRAME_DECODING,
+                WebSocketProtocolErrorCode.INVALID_FRAME,
+                "Encoded frame could not be decoded.",
+            )
+        _validate_decoded_frame(frame, self.maximum_width, self.maximum_height)
+        return frame
+
+
+class WebSocketRuntimeBridge:
+    """Decode one payload, run one frame, and return protocol-v1 metadata."""
+
+    def __init__(
+        self,
+        runtime: GestureRuntime | None = None,
+        decoder: FrameDecoder | None = None,
+        config: WebSocketRuntimeBridgeConfig | None = None,
+    ) -> None:
+        self.config = config or WebSocketRuntimeBridgeConfig()
+        self.runtime = runtime if runtime is not None else GestureRuntime()
+        self.decoder = (
+            decoder
+            if decoder is not None
+            else OpenCVFrameDecoder(
+                self.config.maximum_decoded_width,
+                self.config.maximum_decoded_height,
+            )
+        )
+        self._owns_runtime = runtime is None
+        self._owns_decoder = decoder is None
+        self._last_sequence: int | None = None
+        self._closed = False
+
+    def process_frame(
+        self,
+        payload: bytes,
+        *,
+        timestamp: float | None = None,
+        sequence: int | None = None,
+    ) -> Mapping[str, object]:
+        self._ensure_open("process a frame")
+        self._validate_payload(payload)
+        next_sequence = self._sequence(sequence)
+
+        try:
+            frame = self.decoder.decode(payload)
+        except WebSocketRuntimeBridgeError:
+            raise
+        except Exception as error:
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.FRAME_DECODING,
+                WebSocketProtocolErrorCode.INVALID_FRAME,
+                "Encoded frame could not be decoded.",
+            ) from error
+        _validate_decoded_frame(
+            frame,
+            self.config.maximum_decoded_width,
+            self.config.maximum_decoded_height,
+        )
+
+        try:
+            runtime_result = self.runtime.process(frame, timestamp=timestamp)
+        except Exception as error:
+            message = "Gesture runtime could not process the frame."
+            if self.config.expose_diagnostic_errors:
+                message = f"{message} {str(error)}"
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.RUNTIME_PROCESSING,
+                WebSocketProtocolErrorCode.RUNTIME_FAILURE,
+                message,
+            ) from error
+
+        try:
+            result = self._serialize(runtime_result, next_sequence)
+        except WebSocketRuntimeBridgeError:
+            raise
+        except Exception as error:
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.RESULT_SERIALISATION,
+                WebSocketProtocolErrorCode.INTERNAL_ERROR,
+                "Runtime result could not be serialised.",
+            ) from error
+        self._last_sequence = next_sequence
+        return result
+
+    def _validate_payload(self, payload: bytes) -> None:
+        if not isinstance(payload, bytes):
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.PAYLOAD_VALIDATION,
+                WebSocketProtocolErrorCode.INVALID_FRAME,
+                "Frame payload must be bytes.",
+            )
+        if not payload:
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.PAYLOAD_VALIDATION,
+                WebSocketProtocolErrorCode.INVALID_FRAME,
+                "Frame payload must not be empty.",
+            )
+        if len(payload) > self.config.maximum_encoded_frame_size:
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.PAYLOAD_VALIDATION,
+                WebSocketProtocolErrorCode.FRAME_TOO_LARGE,
+                "Encoded frame exceeds the configured size limit.",
+            )
+
+    def _sequence(self, sequence: int | None) -> int:
+        if sequence is None:
+            return 0 if self._last_sequence is None else self._last_sequence + 1
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.PAYLOAD_VALIDATION,
+                WebSocketProtocolErrorCode.INVALID_MESSAGE,
+                "sequence must be a non-negative integer.",
+            )
+        if self._last_sequence is not None and sequence < self._last_sequence:
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.PAYLOAD_VALIDATION,
+                WebSocketProtocolErrorCode.INVALID_MESSAGE,
+                "sequence cannot be older than the last accepted sequence.",
+            )
+        return sequence
+
+    def _serialize(
+        self,
+        result: GestureRuntimeResult,
+        sequence: int,
+    ) -> dict[str, object]:
+        selected = result.selected_hand
+        identity = result.selected_identity
+        observation = result.observation
+        gesture_label = (
+            observation.prediction.label.value
+            if isinstance(observation, GestureObservation)
+            else None
+        )
+        dispatch = result.engine_result.dispatch_result
+        dispatch_data: dict[str, object] | None = None
+        if dispatch is not None:
+            dispatch_data = {
+                "gesture_label": dispatch.gesture_label.value,
+                "action_kind": dispatch.action.kind.value if dispatch.action else None,
+                "executed": dispatch.executed,
+            }
+        return {
+            "protocol_version": self.config.protocol_version,
+            "type": WebSocketProtocolMessageType.GESTURE_RESULT.value,
+            "sequence": sequence,
+            "timestamp": result.timestamp,
+            "detected_hand_count": result.detected_hand_count,
+            "selection": {
+                "decision": result.selection_decision.value,
+                "identity": (
+                    {
+                        "hand_index": identity.hand_index,
+                        "handedness": identity.handedness,
+                    }
+                    if identity is not None
+                    else None
+                ),
+            },
+            "hand": (
+                {
+                    "index": selected.hand_index,
+                    "handedness": selected.handedness,
+                    "detection_confidence": selected.confidence,
+                }
+                if selected is not None
+                else None
+            ),
+            "gesture": {
+                "label": gesture_label,
+                "engine_decision": result.engine_result.decision.value,
+            },
+            "action_executed": result.action_executed,
+            "dispatch": dispatch_data,
+        }
+
+    def reset(self) -> None:
+        self._ensure_open("reset")
+        try:
+            self.runtime.reset()
+        except Exception as error:
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.RESET,
+                WebSocketProtocolErrorCode.RESET_FAILURE,
+                "Gesture runtime could not be reset.",
+            ) from error
+        self._last_sequence = None
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        failures: list[Exception] = []
+        for dependency, owned in (
+            (self.runtime, self._owns_runtime),
+            (self.decoder, self._owns_decoder),
+        ):
+            close = getattr(dependency, "close", None)
+            if owned and callable(close):
+                try:
+                    close()
+                except Exception as error:
+                    failures.append(error)
+        if failures:
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.LIFECYCLE,
+                WebSocketProtocolErrorCode.INTERNAL_ERROR,
+                "One or more owned bridge dependencies could not be closed.",
+            ) from failures[0]
+
+    def _ensure_open(self, operation: str) -> None:
+        if self._closed:
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.LIFECYCLE,
+                WebSocketProtocolErrorCode.INTERNAL_ERROR,
+                f"Cannot {operation} after bridge closure.",
+            )
+
+    def __enter__(self) -> WebSocketRuntimeBridge:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+
+def _validate_decoded_frame(
+    frame: Any,
+    maximum_width: int | None,
+    maximum_height: int | None,
+) -> None:
+    if not isinstance(frame, np.ndarray) or frame.ndim != 3 or frame.shape[2] != 3:
+        raise WebSocketRuntimeBridgeError(
+            WebSocketRuntimeBridgeStage.FRAME_DECODING,
+            WebSocketProtocolErrorCode.INVALID_FRAME,
+            "Decoded frame must be a three-channel BGR array.",
+        )
+    height, width = frame.shape[:2]
+    if width < 1 or height < 1:
+        raise WebSocketRuntimeBridgeError(
+            WebSocketRuntimeBridgeStage.FRAME_DECODING,
+            WebSocketProtocolErrorCode.INVALID_FRAME,
+            "Decoded frame dimensions must be positive.",
+        )
+    if maximum_width is not None and width > maximum_width:
+        raise WebSocketRuntimeBridgeError(
+            WebSocketRuntimeBridgeStage.FRAME_DECODING,
+            WebSocketProtocolErrorCode.INVALID_FRAME,
+            "Decoded frame exceeds the configured width limit.",
+        )
+    if maximum_height is not None and height > maximum_height:
+        raise WebSocketRuntimeBridgeError(
+            WebSocketRuntimeBridgeStage.FRAME_DECODING,
+            WebSocketProtocolErrorCode.INVALID_FRAME,
+            "Decoded frame exceeds the configured height limit.",
+        )

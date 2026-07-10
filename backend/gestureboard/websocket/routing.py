@@ -1,13 +1,9 @@
-"""
-GestureBoard Pro
-Root WebSocket Routing
-"""
+"""GestureBoard WebSocket endpoint routing."""
 
-from django.urls import include, path
+from django.urls import path
+
+from .consumers import GestureConsumer
 
 websocket_urlpatterns = [
-    path(
-        "ws/",
-        include("gestureboard.websocket.routing"),
-    ),
+    path("ws/", GestureConsumer.as_asgi()),
 ]

@@ -1,3 +1,69 @@
-# Environment
+# ==========================
+# Environment Variables
+# ==========================
 .env
 !.env.example
+
+# ==========================
+# Python
+# ==========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ==========================
+# Django
+# ==========================
+db.sqlite3
+media/
+
+# ==========================
+# IDEs
+# ==========================
+.vscode/
+.idea/
+
+# ==========================
+# Operating System
+# ==========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==========================
+# Build Artifacts
+# ==========================
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# ==========================
+# Logs
+# ==========================
+*.log
+
+# ==========================
+# Type Checkers
+# ==========================
+.pyre/
+.pytype/
+
+# ==========================
+# Temporary Files
+# ==========================
+*.tmp
+*.bak

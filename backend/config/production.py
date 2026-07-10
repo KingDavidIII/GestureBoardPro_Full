@@ -7,6 +7,9 @@ from __future__ import annotations
 
 from .base import *  # noqa: F403
 
+if not SECRET_KEY or SECRET_KEY == "django-insecure-dev-key-change-me":  # noqa: F405
+    raise RuntimeError("DJANGO_SECRET_KEY must be configured for production.")
+
 # =============================================================================
 # Production Configuration
 # =============================================================================
