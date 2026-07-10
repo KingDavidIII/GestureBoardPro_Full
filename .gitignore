@@ -48,6 +48,9 @@ desktop.ini
 # ==========================
 build/
 dist/
+node_modules/
+coverage/
+.vitest/
 *.egg-info/
 pip-wheel-metadata/
 
