@@ -1,12 +1,11 @@
 import cv2
+
 from gestureboard.services.camera import CameraService
 from gestureboard.services.landmark_processor import LandmarkProcessor
 
-processor = LandmarkProcessor()
-
-with CameraService() as camera:
+with LandmarkProcessor() as processor, CameraService() as camera:
     while True:
-        frame = camera.read()
+        frame = camera.read().frame
 
         annotated, hands = processor.process(frame)
 
@@ -26,7 +25,5 @@ with CameraService() as camera:
 
         if key == ord("q"):
             break
-
-processor.close()
 
 cv2.destroyAllWindows()
