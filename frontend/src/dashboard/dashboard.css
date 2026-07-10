@@ -83,6 +83,33 @@ button:disabled {
 .message-log li {
   overflow-wrap: anywhere;
 }
+.camera-preview {
+  width: 100%;
+  max-height: 24rem;
+  background: #020617;
+  border-radius: 0.45rem;
+  object-fit: contain;
+}
+.camera-status,
+.stream-status {
+  display: block;
+  margin: 0.75rem 0;
+  font-weight: 700;
+}
+.stream-diagnostics {
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  color: #cbd5e1;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
 @media (min-width: 48rem) {
   .controls {
     grid-template-columns: repeat(4, minmax(0, 1fr));
