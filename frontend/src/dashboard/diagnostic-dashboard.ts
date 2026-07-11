@@ -56,6 +56,7 @@ export class DiagnosticDashboard {
   private annotationUrl: string | null = null;
   private readonly objectUrls: ObjectUrlApi;
   private destroyed = false;
+  private reconnectPending = false;
 
   constructor(
     private readonly root: HTMLElement,
@@ -151,6 +152,10 @@ export class DiagnosticDashboard {
     if (this.options.stream?.getState() === FrameStreamState.STREAMING)
       this.options.stream.stop();
     this.client.disconnect();
+    this.reconnectPending = false;
+    this.status.textContent = "Manually disconnected";
+    this.renderState(this.client.getState());
+    this.status.textContent = "Manually disconnected";
   }
   private async startCamera(): Promise<void> {
     try {
@@ -199,6 +204,30 @@ export class DiagnosticDashboard {
       this.renderAnnotation();
     } else if (event.type === "annotated-frame") {
       this.showAnnotation(event.frame);
+    } else if (event.type === "reconnect.scheduled") {
+      this.reconnectPending = true;
+      this.renderState(this.client.getState());
+      this.status.textContent = `Reconnect attempt ${event.attempt} scheduled in approximately ${event.delayMs} ms`;
+      this.append(
+        "Reconnect scheduled",
+        `Attempt ${event.attempt}; ${event.delayMs} ms`,
+      );
+    } else if (event.type === "reconnect.started") {
+      this.reconnectPending = false;
+      this.status.textContent = `Reconnect attempt ${event.attempt} in progress`;
+      this.append("Reconnect started", `Attempt ${event.attempt}`);
+    } else if (event.type === "reconnect.succeeded") {
+      this.reconnectPending = false;
+      this.status.textContent = `Connected after retry ${event.attempt}`;
+      this.append("Reconnect succeeded", `Attempt ${event.attempt}`);
+    } else if (event.type === "reconnect.exhausted") {
+      this.reconnectPending = false;
+      this.status.textContent = `Reconnect attempts exhausted after ${event.attempts} attempts`;
+      this.append("Reconnect exhausted", `${event.attempts} attempts`);
+    } else if (event.type === "reconnect.cancelled") {
+      this.reconnectPending = false;
+      this.status.textContent = event.reason;
+      this.append("Reconnect cancelled", event.reason);
     } else if (event.type === "protocol.error" || event.type === "socket.error")
       this.append(event.error.code, event.error.message);
     else
@@ -224,7 +253,8 @@ export class DiagnosticDashboard {
     this.status.textContent = `Connection state: ${state}`;
     this.connectButton.disabled =
       state === "CONNECTING" || connected || state === "CLOSING";
-    this.disconnectButton.disabled = state === "IDLE" || state === "CLOSED";
+    this.disconnectButton.disabled =
+      (state === "IDLE" || state === "CLOSED") && !this.reconnectPending;
     this.pingButton.disabled = !connected;
     this.resetButton.disabled = !connected;
     this.renderCamera();

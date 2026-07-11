@@ -6,6 +6,7 @@ import { FrameStreamState, type FrameStreamController } from "../src/streaming";
 import {
   GestureWebSocketClient,
   type GestureWebSocketClientEvent,
+  type ReconnectTimerApi,
 } from "../src/websocket";
 import { FakeWebSocket } from "./fake-websocket";
 
@@ -29,6 +30,23 @@ function annotatedEnvelope(
   return view.buffer;
 }
 
+class DashboardReconnectTimers implements ReconnectTimerApi {
+  readonly callbacks: Array<() => void> = [];
+  set(callback: () => void): unknown {
+    this.callbacks.push(callback);
+    return callback;
+  }
+  clear(handle: unknown): void {
+    const index = this.callbacks.indexOf(handle as () => void);
+    if (index >= 0) this.callbacks.splice(index, 1);
+  }
+  runNext(): void {
+    const callback = this.callbacks.shift();
+    if (!callback) throw new Error("No reconnect callback is pending.");
+    callback();
+  }
+}
+
 describe("DiagnosticDashboard", () => {
   let root: HTMLDivElement;
   let socket: FakeWebSocket;
@@ -40,13 +58,30 @@ describe("DiagnosticDashboard", () => {
   let streamStop: ReturnType<typeof vi.fn>;
   let cameraDetach: ReturnType<typeof vi.fn>;
   let streamState: FrameStreamState;
+  let reconnectTimers: DashboardReconnectTimers;
+  let sockets: FakeWebSocket[];
 
   beforeEach(() => {
     root = document.createElement("div");
     document.body.append(root);
     socket = new FakeWebSocket();
+    sockets = [];
+    reconnectTimers = new DashboardReconnectTimers();
     client = new GestureWebSocketClient("ws://board.test/ws/", {
-      socketFactory: () => socket,
+      socketFactory: () => {
+        const next = sockets.length === 0 ? socket : new FakeWebSocket();
+        sockets.push(next);
+        return next;
+      },
+      reconnectTimers,
+      random: () => 0.5,
+      reconnectPolicy: {
+        initialDelayMs: 100,
+        maximumDelayMs: 200,
+        multiplier: 2,
+        maximumAttempts: 2,
+        jitterRatio: 0,
+      },
     });
     let objectUrlSequence = 0;
     createObjectURL = vi.fn(() => {
@@ -434,5 +469,103 @@ describe("DiagnosticDashboard", () => {
     expect(log?.querySelector("img")).toBeNull();
     expect(log?.textContent).not.toContain("Error:");
     expect(client.getAnnotatedFramesEnabled()).toBe(true);
+  });
+
+  it("displays a scheduled retry and manual cancellation details", async () => {
+    await connectAndEnableAnnotations();
+    socket.remoteClose(1006, "network lost");
+
+    expect(root.querySelector(".connection-status")?.textContent).toContain(
+      "attempt 1",
+    );
+    expect(root.querySelector(".connection-status")?.textContent).toContain(
+      "100 ms",
+    );
+
+    root
+      .querySelector<HTMLButtonElement>('[data-action="disconnect"]')
+      ?.click();
+
+    expect(reconnectTimers.callbacks).toHaveLength(0);
+    expect(root.querySelector(".connection-status")?.textContent).toBe(
+      "Manually disconnected",
+    );
+  });
+
+  it("shows retry progress and clears warnings after successful reconnect", async () => {
+    await connectAndEnableAnnotations();
+    socket.remoteClose();
+    reconnectTimers.runNext();
+
+    expect(root.querySelector(".connection-status")?.textContent).toContain(
+      "in progress",
+    );
+    sockets[1]?.open();
+    await Promise.resolve();
+    expect(root.querySelector(".connection-status")?.textContent).toContain(
+      "Connected after retry 1",
+    );
+  });
+
+  it("renders retry exhaustion without unsafe markup", async () => {
+    await connectAndEnableAnnotations();
+    socket.remoteClose();
+    reconnectTimers.runNext();
+    sockets[1]?.error();
+    reconnectTimers.runNext();
+    sockets[2]?.error();
+
+    expect(root.querySelector(".connection-status")?.textContent).toContain(
+      "exhausted after 2 attempts",
+    );
+    expect(root.querySelector(".message-log")?.textContent).toContain(
+      "Reconnect exhausted",
+    );
+  });
+
+  it("requires fresh annotation opt-in and leaves streaming stopped after reconnect", async () => {
+    await connectAndEnableAnnotations();
+    streamState = FrameStreamState.STREAMING;
+    socket.remoteClose();
+
+    expect(streamStop).toHaveBeenCalled();
+    expect(streamState).toBe(FrameStreamState.STOPPED);
+    expect(client.getAnnotatedFramesEnabled()).toBe(false);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-action="annotation"]')
+        ?.disabled,
+    ).toBe(true);
+
+    reconnectTimers.runNext();
+    sockets[1]?.open();
+    await Promise.resolve();
+    expect(streamState).toBe(FrameStreamState.STOPPED);
+    expect(client.getAnnotatedFramesEnabled()).toBe(false);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-action="annotation"]')
+        ?.disabled,
+    ).toBe(true);
+    expect(sockets[1]?.sent).toEqual([]);
+
+    sockets[1]?.message(
+      '{"protocol_version":1,"type":"connection.ready","capabilities":["annotated_frame.jpeg.v1"]}',
+    );
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-action="annotation"]')
+        ?.disabled,
+    ).toBe(false);
+    expect(client.getAnnotatedFramesEnabled()).toBe(false);
+  });
+
+  it("renders a malicious remote-close reason only as plain text", async () => {
+    const malicious = "<img src=x onerror=alert(1)>";
+    await connectAndEnableAnnotations();
+    socket.remoteClose(1006, malicious);
+
+    expect(root.querySelector(".message-log")?.textContent).toContain(
+      malicious,
+    );
+    expect(root.querySelectorAll("img")).toHaveLength(1);
+    expect(root.querySelector("[onerror]")).toBeNull();
   });
 });

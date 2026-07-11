@@ -3,8 +3,19 @@ import {
   decodeAnnotatedFrameEnvelope,
   parseServerMessage,
 } from "../protocol";
-import type { AnnotatedFrameMessage } from "../protocol";
-import type { ClientControlMessage, ServerMessage } from "../protocol";
+import type {
+  AnnotatedFrameMessage,
+  ClientControlMessage,
+  ServerMessage,
+} from "../protocol";
+import {
+  browserReconnectTimers,
+  calculateReconnectDelay,
+  createReconnectPolicy,
+  type ReconnectPolicy,
+  type ReconnectPolicyConfig,
+  type ReconnectTimerApi,
+} from "./reconnect-policy";
 import {
   WebSocketClientState,
   type GestureWebSocketClientEvent,
@@ -28,7 +39,6 @@ export enum GestureWebSocketClientErrorCode {
 
 export class GestureWebSocketClientError extends Error {
   readonly code: GestureWebSocketClientErrorCode;
-
   constructor(
     code: GestureWebSocketClientErrorCode,
     message: string,
@@ -56,6 +66,20 @@ export interface GestureWebSocketClientOptions {
   readonly maximumFrameSize?: number;
   readonly socketFactory?: WebSocketFactory;
   readonly subscriberErrorHandler?: (error: unknown) => void;
+  readonly reconnectPolicy?: ReconnectPolicyConfig;
+  readonly reconnectTimers?: ReconnectTimerApi;
+  readonly random?: () => number;
+}
+
+interface ActiveConnection {
+  readonly socket: WebSocketLike;
+  readonly epoch: number;
+  readonly reconnectAttempt: number;
+  readonly handlers: Readonly<
+    Record<"open" | "message" | "error" | "close", EventListener>
+  >;
+  readonly resolve: () => void;
+  readonly reject: (error: GestureWebSocketClientError) => void;
 }
 
 const OPEN = 1;
@@ -65,186 +89,113 @@ const DEFAULT_MAXIMUM_FRAME_SIZE = 5 * 1024 * 1024;
 export class GestureWebSocketClient {
   readonly url: string;
   readonly maximumFrameSize: number;
+  readonly reconnectPolicy: Readonly<ReconnectPolicy>;
   private readonly socketFactory: WebSocketFactory;
   private readonly subscriberErrorHandler: (error: unknown) => void;
+  private readonly reconnectTimers: ReconnectTimerApi;
+  private readonly random: () => number;
   private readonly listeners = new Set<GestureWebSocketClientListener>();
   private state = WebSocketClientState.IDLE;
-  private socket: WebSocketLike | null = null;
+  private active: ActiveConnection | null = null;
   private lastMessage: ServerMessage | null = null;
   private lastError: GestureWebSocketClientError | null = null;
   private annotatedFramesEnabled = false;
   private latestAnnotatedFrame: AnnotatedFrameMessage | null = null;
-  private pendingResolve: (() => void) | null = null;
-  private pendingReject:
-    | ((reason: GestureWebSocketClientError) => void)
-    | null = null;
-
-  private readonly onOpen: EventListener = () => {
-    this.setState(WebSocketClientState.OPEN);
-    this.pendingResolve?.();
-    this.clearPending();
-  };
-
-  private readonly onMessage: EventListener = (event) => {
-    const data = (event as MessageEvent<unknown>).data;
-    if (typeof data !== "string") {
-      if (data instanceof ArrayBuffer || data instanceof Blob)
-        void this.handleAnnotatedFrame(data);
-      else
-        this.reportProtocolError(
-          GestureWebSocketClientErrorCode.UNSUPPORTED_SERVER_MESSAGE,
-          "Binary server messages are not supported.",
-        );
-      return;
-    }
-    try {
-      const message = parseServerMessage(data);
-      this.lastMessage = message;
-      if (message.type === "annotated_frame.set.ack")
-        this.annotatedFramesEnabled = message.enabled;
-      this.emit(Object.freeze({ type: "protocol.message", message }));
-    } catch (error) {
-      const code =
-        typeof error === "object" &&
-        error !== null &&
-        "code" in error &&
-        typeof error.code === "string" &&
-        error.code in GestureWebSocketClientErrorCode
-          ? (error.code as GestureWebSocketClientErrorCode)
-          : GestureWebSocketClientErrorCode.INVALID_PROTOCOL_MESSAGE;
-      this.reportProtocolError(code, "Invalid server protocol message.", error);
-    }
-  };
-
-  private readonly onError: EventListener = (event) => {
-    const error = new GestureWebSocketClientError(
-      GestureWebSocketClientErrorCode.CONNECTION_FAILED,
-      "WebSocket connection failed.",
-      { cause: event },
-    );
-    this.lastError = error;
-    this.setState(WebSocketClientState.ERROR);
-    this.emit(Object.freeze({ type: "socket.error", error }));
-    this.pendingReject?.(error);
-    this.clearPending();
-    this.disposeSocket(true);
-  };
-
-  private readonly onClose: EventListener = (event) => {
-    const closeEvent = event as CloseEvent;
-    this.disposeSocket(false);
-    this.annotatedFramesEnabled = false;
-    this.latestAnnotatedFrame = null;
-    this.setState(WebSocketClientState.CLOSED);
-    this.emit(
-      Object.freeze({
-        type: "socket.closed",
-        code: closeEvent.code,
-        reason: closeEvent.reason,
-      }),
-    );
-    if (this.pendingReject) {
-      const error = new GestureWebSocketClientError(
-        GestureWebSocketClientErrorCode.CONNECTION_CLOSED,
-        "WebSocket closed before opening.",
-      );
-      this.lastError = error;
-      this.pendingReject(error);
-      this.clearPending();
-    }
-  };
+  private epoch = 0;
+  private retryAttempts = 0;
+  private reconnectTimer: unknown | null = null;
+  private intentionalDisconnect = false;
+  private disposed = false;
 
   constructor(url: string, options: GestureWebSocketClientOptions = {}) {
     const parsed = new URL(url);
-    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:")
       throw new GestureWebSocketClientError(
         GestureWebSocketClientErrorCode.INVALID_URL,
         "WebSocket URL must use ws: or wss:.",
       );
-    }
     const maximum = options.maximumFrameSize ?? DEFAULT_MAXIMUM_FRAME_SIZE;
-    if (!Number.isSafeInteger(maximum) || maximum < 1) {
+    if (!Number.isSafeInteger(maximum) || maximum < 1)
       throw new GestureWebSocketClientError(
         GestureWebSocketClientErrorCode.INVALID_FRAME,
         "maximumFrameSize must be a positive integer.",
       );
-    }
     this.url = parsed.toString();
     this.maximumFrameSize = maximum;
+    this.reconnectPolicy = createReconnectPolicy(options.reconnectPolicy);
     this.socketFactory =
       options.socketFactory ?? ((target) => new WebSocket(target));
     this.subscriberErrorHandler =
       options.subscriberErrorHandler ??
       ((error) => console.error("Subscriber failed", error));
+    this.reconnectTimers = options.reconnectTimers ?? browserReconnectTimers;
+    this.random = options.random ?? Math.random;
   }
 
   connect(): Promise<void> {
+    if (this.disposed)
+      return Promise.reject(
+        this.clientError(
+          GestureWebSocketClientErrorCode.INVALID_STATE,
+          "WebSocket client has been destroyed.",
+        ),
+      );
     if (
       this.state === WebSocketClientState.CONNECTING ||
       this.state === WebSocketClientState.OPEN
-    ) {
+    )
       return Promise.reject(
-        new GestureWebSocketClientError(
+        this.clientError(
           GestureWebSocketClientErrorCode.INVALID_STATE,
           "WebSocket is already connecting or open.",
         ),
       );
-    }
-    this.lastError = null;
-    this.setState(WebSocketClientState.CONNECTING);
-    try {
-      this.socket = this.socketFactory(this.url);
-      this.socket.binaryType = "arraybuffer";
-      this.attach(this.socket);
-    } catch (cause) {
-      const error = new GestureWebSocketClientError(
-        GestureWebSocketClientErrorCode.CONNECTION_FAILED,
-        "WebSocket could not be constructed.",
-        { cause },
-      );
-      this.lastError = error;
-      this.setState(WebSocketClientState.ERROR);
-      return Promise.reject(error);
-    }
-    return new Promise<void>((resolve, reject) => {
-      this.pendingResolve = resolve;
-      this.pendingReject = reject;
-    });
+    this.cancelReconnect("Manual connection requested");
+    this.retryAttempts = 0;
+    this.intentionalDisconnect = false;
+    return this.startConnection(0);
   }
 
   disconnect(): void {
-    if (!this.socket) {
-      if (this.state !== WebSocketClientState.IDLE)
-        this.setState(WebSocketClientState.CLOSED);
+    if (
+      this.intentionalDisconnect &&
+      !this.active &&
+      this.reconnectTimer === null
+    )
       return;
-    }
-    this.setState(WebSocketClientState.CLOSING);
-    const socket = this.socket;
-    this.detach(socket);
-    this.socket = null;
-    socket.close(1000, "Client disconnect");
-    if (this.pendingReject) {
-      this.pendingReject(
-        new GestureWebSocketClientError(
+    this.intentionalDisconnect = true;
+    this.cancelReconnect("Manually disconnected");
+    this.resetConnectionEpoch();
+    const connection = this.active;
+    if (connection) {
+      this.setState(WebSocketClientState.CLOSING);
+      this.detach(connection);
+      this.active = null;
+      this.epoch += 1;
+      connection.reject(
+        this.clientError(
           GestureWebSocketClientErrorCode.CONNECTION_CLOSED,
-          "Connection attempt was cancelled.",
+          "Connection was manually closed.",
         ),
       );
-      this.clearPending();
+      connection.socket.close(1000, "Client disconnect");
     }
     this.setState(WebSocketClientState.CLOSED);
-    this.annotatedFramesEnabled = false;
-    this.latestAnnotatedFrame = null;
+  }
+
+  destroy(): void {
+    if (this.disposed) return;
+    this.disconnect();
+    this.disposed = true;
+    this.listeners.clear();
   }
 
   sendPing(requestId?: string): void {
     this.sendControl(this.controlMessage("ping", requestId));
   }
-
   resetRuntime(requestId?: string): void {
     this.sendControl(this.controlMessage("runtime.reset", requestId));
   }
-
   sendFrame(payload: Blob | ArrayBuffer | Uint8Array): void {
     this.requireOpen();
     const size = this.frameSize(payload);
@@ -260,7 +211,6 @@ export class GestureWebSocketClient {
       );
     this.send(payload);
   }
-
   setAnnotatedFramesEnabled(enabled: boolean, requestId?: string): void {
     if (typeof enabled !== "boolean")
       throw this.clientError(
@@ -277,16 +227,13 @@ export class GestureWebSocketClient {
   getLatestAnnotatedFrame(): AnnotatedFrameMessage | null {
     return this.latestAnnotatedFrame;
   }
-
   subscribe(listener: GestureWebSocketClientListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
-
   unsubscribe(listener: GestureWebSocketClientListener): void {
     this.listeners.delete(listener);
   }
-
   getState(): WebSocketClientState {
     return this.state;
   }
@@ -297,7 +244,192 @@ export class GestureWebSocketClient {
     return this.lastError;
   }
   getBufferedAmount(): number {
-    return this.socket?.bufferedAmount ?? 0;
+    return this.active?.socket.bufferedAmount ?? 0;
+  }
+  getReconnectAttempt(): number {
+    return this.retryAttempts;
+  }
+
+  private startConnection(reconnectAttempt: number): Promise<void> {
+    this.lastError = null;
+    this.setState(WebSocketClientState.CONNECTING);
+    const epoch = ++this.epoch;
+    return new Promise<void>((resolve, reject) => {
+      let socket: WebSocketLike;
+      try {
+        socket = this.socketFactory(this.url);
+        socket.binaryType = "arraybuffer";
+      } catch (cause) {
+        const error = this.clientError(
+          GestureWebSocketClientErrorCode.CONNECTION_FAILED,
+          "WebSocket could not be constructed.",
+          cause,
+        );
+        this.lastError = error;
+        this.setState(WebSocketClientState.ERROR);
+        reject(error);
+        this.scheduleReconnect();
+        return;
+      }
+      const handlers = {
+        open: () => this.handleOpen(epoch),
+        message: (event: Event) => this.handleMessage(epoch, event),
+        error: (event: Event) => this.handleFailure(epoch, event),
+        close: (event: Event) => this.handleClose(epoch, event),
+      } satisfies ActiveConnection["handlers"];
+      const connection: ActiveConnection = {
+        socket,
+        epoch,
+        reconnectAttempt,
+        handlers,
+        resolve,
+        reject,
+      };
+      this.active = connection;
+      this.attach(connection);
+    });
+  }
+
+  private handleOpen(epoch: number): void {
+    const connection = this.current(epoch);
+    if (!connection) return;
+    this.retryAttempts = 0;
+    this.setState(WebSocketClientState.OPEN);
+    connection.resolve();
+    if (connection.reconnectAttempt > 0)
+      this.emit(
+        Object.freeze({
+          type: "reconnect.succeeded",
+          attempt: connection.reconnectAttempt,
+        }),
+      );
+  }
+
+  private handleMessage(epoch: number, event: Event): void {
+    if (!this.current(epoch)) return;
+    const data = (event as MessageEvent<unknown>).data;
+    if (typeof data !== "string") {
+      if (data instanceof ArrayBuffer || data instanceof Blob)
+        void this.handleAnnotatedFrame(epoch, data);
+      else
+        this.reportProtocolError(
+          GestureWebSocketClientErrorCode.UNSUPPORTED_SERVER_MESSAGE,
+          "Binary server messages are not supported.",
+        );
+      return;
+    }
+    try {
+      const message = parseServerMessage(data);
+      if (!this.current(epoch)) return;
+      this.lastMessage = message;
+      if (message.type === "annotated_frame.set.ack")
+        this.annotatedFramesEnabled = message.enabled;
+      this.emit(Object.freeze({ type: "protocol.message", message }));
+    } catch (error) {
+      const code =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        typeof error.code === "string" &&
+        error.code in GestureWebSocketClientErrorCode
+          ? (error.code as GestureWebSocketClientErrorCode)
+          : GestureWebSocketClientErrorCode.INVALID_PROTOCOL_MESSAGE;
+      this.reportProtocolError(code, "Invalid server protocol message.", error);
+    }
+  }
+
+  private handleFailure(epoch: number, event: Event): void {
+    const connection = this.current(epoch);
+    if (!connection) return;
+    const error = this.clientError(
+      GestureWebSocketClientErrorCode.CONNECTION_FAILED,
+      "WebSocket connection failed.",
+      event,
+    );
+    this.lastError = error;
+    this.setState(WebSocketClientState.ERROR);
+    this.emit(Object.freeze({ type: "socket.error", error }));
+    this.finishUnexpected(connection, error, true);
+  }
+
+  private handleClose(epoch: number, event: Event): void {
+    const connection = this.current(epoch);
+    if (!connection) return;
+    const closeEvent = event as CloseEvent;
+    this.emit(
+      Object.freeze({
+        type: "socket.closed",
+        code: closeEvent.code,
+        reason: closeEvent.reason,
+      }),
+    );
+    const error = this.clientError(
+      GestureWebSocketClientErrorCode.CONNECTION_CLOSED,
+      "WebSocket connection closed unexpectedly.",
+    );
+    this.setState(WebSocketClientState.CLOSED);
+    this.finishUnexpected(connection, error, false);
+  }
+
+  private finishUnexpected(
+    connection: ActiveConnection,
+    error: GestureWebSocketClientError,
+    closeSocket: boolean,
+  ): void {
+    if (!this.current(connection.epoch)) return;
+    this.detach(connection);
+    this.active = null;
+    this.resetConnectionEpoch();
+    connection.reject(error);
+    if (closeSocket) connection.socket.close();
+    if (!this.intentionalDisconnect && !this.disposed) this.scheduleReconnect();
+  }
+
+  private scheduleReconnect(): void {
+    if (
+      !this.reconnectPolicy.enabled ||
+      this.intentionalDisconnect ||
+      this.disposed ||
+      this.reconnectTimer !== null ||
+      this.active
+    )
+      return;
+    if (this.retryAttempts >= this.reconnectPolicy.maximumAttempts) {
+      this.emit(
+        Object.freeze({
+          type: "reconnect.exhausted",
+          attempts: this.retryAttempts,
+        }),
+      );
+      return;
+    }
+    const attempt = this.retryAttempts + 1;
+    const delayMs = calculateReconnectDelay(
+      this.reconnectPolicy,
+      attempt,
+      this.random(),
+    );
+    this.retryAttempts = attempt;
+    this.reconnectTimer = this.reconnectTimers.set(() => {
+      this.reconnectTimer = null;
+      if (this.intentionalDisconnect || this.disposed || this.active) return;
+      const connection = this.startConnection(attempt);
+      this.emit(Object.freeze({ type: "reconnect.started", attempt }));
+      void connection.catch(() => undefined);
+    }, delayMs);
+    this.emit(Object.freeze({ type: "reconnect.scheduled", attempt, delayMs }));
+  }
+
+  private cancelReconnect(reason: string): void {
+    if (this.reconnectTimer === null) return;
+    this.reconnectTimers.clear(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.emit(Object.freeze({ type: "reconnect.cancelled", reason }));
+  }
+
+  private resetConnectionEpoch(): void {
+    this.annotatedFramesEnabled = false;
+    this.latestAnnotatedFrame = null;
   }
 
   private controlMessage(
@@ -305,34 +437,31 @@ export class GestureWebSocketClient {
     requestId?: string,
     enabled?: boolean,
   ): ClientControlMessage {
-    if (requestId !== undefined) {
-      if (
-        typeof requestId !== "string" ||
+    if (
+      requestId !== undefined &&
+      (typeof requestId !== "string" ||
         !requestId.trim() ||
-        requestId.length > MAXIMUM_REQUEST_ID_LENGTH
-      ) {
-        throw this.clientError(
-          GestureWebSocketClientErrorCode.INVALID_CONTROL_MESSAGE,
-          "Invalid request_id.",
-        );
-      }
-      return {
-        protocol_version: PROTOCOL_VERSION,
-        type,
-        request_id: requestId,
-        ...(type === "annotated_frame.set" ? { enabled } : {}),
-      } as ClientControlMessage;
-    }
+        requestId.length > MAXIMUM_REQUEST_ID_LENGTH)
+    )
+      throw this.clientError(
+        GestureWebSocketClientErrorCode.INVALID_CONTROL_MESSAGE,
+        "Invalid request_id.",
+      );
     return {
       protocol_version: PROTOCOL_VERSION,
       type,
+      ...(requestId === undefined ? {} : { request_id: requestId }),
       ...(type === "annotated_frame.set" ? { enabled } : {}),
     } as ClientControlMessage;
   }
 
-  private async handleAnnotatedFrame(data: ArrayBuffer | Blob): Promise<void> {
+  private async handleAnnotatedFrame(
+    epoch: number,
+    data: ArrayBuffer | Blob,
+  ): Promise<void> {
     try {
       const frame = await decodeAnnotatedFrameEnvelope(data);
+      if (!this.current(epoch)) return;
       if (
         this.latestAnnotatedFrame &&
         frame.sequence <= this.latestAnnotatedFrame.sequence
@@ -341,11 +470,12 @@ export class GestureWebSocketClient {
       this.latestAnnotatedFrame = frame;
       this.emit(Object.freeze({ type: "annotated-frame", frame }));
     } catch (cause) {
-      this.reportProtocolError(
-        GestureWebSocketClientErrorCode.INVALID_PROTOCOL_MESSAGE,
-        "Invalid annotated frame envelope.",
-        cause,
-      );
+      if (this.current(epoch))
+        this.reportProtocolError(
+          GestureWebSocketClientErrorCode.INVALID_PROTOCOL_MESSAGE,
+          "Invalid annotated frame envelope.",
+          cause,
+        );
     }
   }
 
@@ -353,10 +483,9 @@ export class GestureWebSocketClient {
     this.requireOpen();
     this.send(JSON.stringify(message));
   }
-
   private send(payload: string | Blob | ArrayBuffer | Uint8Array): void {
     try {
-      this.socket?.send(payload);
+      this.active?.socket.send(payload);
     } catch (cause) {
       throw this.clientError(
         GestureWebSocketClientErrorCode.SEND_FAILED,
@@ -365,7 +494,6 @@ export class GestureWebSocketClient {
       );
     }
   }
-
   private frameSize(payload: unknown): number {
     if (payload instanceof Blob) return payload.size;
     if (payload instanceof ArrayBuffer) return payload.byteLength;
@@ -375,20 +503,17 @@ export class GestureWebSocketClient {
       "Unsupported frame payload type.",
     );
   }
-
   private requireOpen(): void {
     if (
-      !this.socket ||
+      !this.active ||
       this.state !== WebSocketClientState.OPEN ||
-      this.socket.readyState !== OPEN
-    ) {
+      this.active.socket.readyState !== OPEN
+    )
       throw this.clientError(
         GestureWebSocketClientErrorCode.INVALID_STATE,
         "WebSocket is not open.",
       );
-    }
   }
-
   private reportProtocolError(
     code: GestureWebSocketClientErrorCode,
     message: string,
@@ -398,7 +523,6 @@ export class GestureWebSocketClient {
     this.lastError = error;
     this.emit(Object.freeze({ type: "protocol.error", error }));
   }
-
   private clientError(
     code: GestureWebSocketClientErrorCode,
     message: string,
@@ -410,12 +534,10 @@ export class GestureWebSocketClient {
       cause === undefined ? undefined : { cause },
     );
   }
-
   private setState(state: WebSocketClientState): void {
     this.state = state;
     this.emit(Object.freeze({ type: "state.changed", state }));
   }
-
   private emit(event: GestureWebSocketClientEvent): void {
     for (const listener of [...this.listeners]) {
       try {
@@ -425,31 +547,15 @@ export class GestureWebSocketClient {
       }
     }
   }
-
-  private attach(socket: WebSocketLike): void {
-    socket.addEventListener("open", this.onOpen);
-    socket.addEventListener("message", this.onMessage);
-    socket.addEventListener("error", this.onError);
-    socket.addEventListener("close", this.onClose);
+  private current(epoch: number): ActiveConnection | null {
+    return this.active?.epoch === epoch ? this.active : null;
   }
-
-  private detach(socket: WebSocketLike): void {
-    socket.removeEventListener("open", this.onOpen);
-    socket.removeEventListener("message", this.onMessage);
-    socket.removeEventListener("error", this.onError);
-    socket.removeEventListener("close", this.onClose);
+  private attach(connection: ActiveConnection): void {
+    for (const type of ["open", "message", "error", "close"] as const)
+      connection.socket.addEventListener(type, connection.handlers[type]);
   }
-
-  private disposeSocket(close: boolean): void {
-    if (!this.socket) return;
-    const socket = this.socket;
-    this.detach(socket);
-    this.socket = null;
-    if (close) socket.close();
-  }
-
-  private clearPending(): void {
-    this.pendingResolve = null;
-    this.pendingReject = null;
+  private detach(connection: ActiveConnection): void {
+    for (const type of ["open", "message", "error", "close"] as const)
+      connection.socket.removeEventListener(type, connection.handlers[type]);
   }
 }

@@ -1,7 +1,7 @@
 # GestureBoard Pro frontend
 
-Sprint 2 Alpha 3 adds optional annotated JPEG feedback. Sprint 2 is not yet
-complete, and automatic WebSocket reconnection is not present.
+Sprint 2 Alpha 4 adds deterministic WebSocket recovery to camera streaming and
+optional annotated JPEG feedback. Sprint 2 is not yet complete.
 
 ## Commands
 
@@ -50,8 +50,30 @@ client.disconnect();
 ```
 
 `subscribe()` receives typed connection-state, server-message, protocol-error,
-socket-error, and socket-closed events. `sendFrame()` accepts `Blob`,
+socket-error, socket-closed, and reconnect lifecycle events. `sendFrame()` accepts `Blob`,
 `ArrayBuffer`, or `Uint8Array`, and rejects empty or oversized payloads.
+
+## Connection recovery
+
+Unexpected remote closure or connection failure schedules automatic recovery.
+The default policy starts at 500 ms, doubles each failure, caps at 8000 ms,
+stops after 5 attempts, and applies up to 20% jitter. Policy values, timers, and
+randomness are injectable so tests remain deterministic. Manual **Connect**
+during a scheduled retry cancels the timer and connects immediately.
+
+Manual disconnect and client destruction always cancel pending retries and
+never reconnect. All socket callbacks carry a monotonically increasing
+connection epoch; late open, close, message, and annotated-frame work from an
+old socket cannot mutate a newer session. The implementation treats every
+remote close code as unexpected unless the local client initiated disconnect.
+
+Connection loss clears confirmed annotation state and pending annotated frames.
+After recovery, a fresh `connection.ready` capability advertisement and a new
+explicit user opt-in are required. Annotation is never re-enabled
+automatically. Frame streaming stops as soon as the socket leaves `OPEN` and
+does not resume after reconnect; the camera may remain ready, but the user must
+start streaming again. Retry exhaustion is reported in the diagnostic
+dashboard and requires manual connection.
 
 ```ts
 const camera = new CameraController();
