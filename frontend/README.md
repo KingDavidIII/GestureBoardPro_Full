@@ -1,8 +1,7 @@
 # GestureBoard Pro frontend
 
-Sprint 2 Alpha 2 adds user-initiated browser camera capture and JPEG frame
-streaming on top of the typed WebSocket protocol client. Sprint 2 is not yet
-complete: annotated-frame streaming and automatic reconnection are not present.
+Sprint 2 Alpha 3 adds optional annotated JPEG feedback. Sprint 2 is not yet
+complete, and automatic WebSocket reconnection is not present.
 
 ## Commands
 
@@ -73,7 +72,17 @@ camera.stop();
 All JSON control and server messages use `protocol_version: 1`. Incoming data
 is parsed and runtime-validated before it becomes a `ServerMessage`; malformed,
 unsupported-version, and unsupported-type messages produce typed client errors.
-Binary inbound messages are intentionally unsupported in Alpha 1.
+Annotated feedback is opt-in and disabled by default. A server advertises
+`annotated_frame.jpeg.v1`; clients then send `annotated_frame.set` and wait for
+`annotated_frame.set.ack`. Each `gesture.result` JSON metadata message is sent
+before its optional correlated GBF1 binary JPEG frame, using the same sequence.
+
+GBF1 uses a 20-byte network-order header: `GBF1`, version, kind, two reserved
+zero bytes, uint32 sequence, uint16 width, uint16 height, uint32 JPEG length,
+then the JPEG payload. Images never enter JSON and base64 is never used. The UI
+uses a JPEG Blob/object URL and revokes URLs on replacement, disable,
+disconnect, and destruction. Annotation increases CPU and bandwidth usage; the
+backend continues to process frames sequentially.
 
 ## Testing
 

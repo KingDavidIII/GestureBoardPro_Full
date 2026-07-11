@@ -3,7 +3,7 @@ import {
   type CameraController,
   type CameraEvent,
 } from "../camera";
-import type { ServerMessage } from "../protocol";
+import type { AnnotatedFrameMessage, ServerMessage } from "../protocol";
 import {
   FrameStreamState,
   type FrameStreamController,
@@ -17,11 +17,16 @@ import type {
 
 const MAXIMUM_LOG_ENTRIES = 50;
 
+export interface ObjectUrlApi {
+  createObjectURL(blob: Blob): string;
+  revokeObjectURL(url: string): void;
+}
 export interface DiagnosticDashboardOptions {
   readonly camera?: CameraController;
   readonly stream?: FrameStreamController;
   readonly jpegQuality?: number;
   readonly maximumFrameWidth?: number;
+  readonly objectUrls?: ObjectUrlApi;
 }
 
 export class DiagnosticDashboard {
@@ -38,12 +43,19 @@ export class DiagnosticDashboard {
   private readonly startStreamButton: HTMLButtonElement;
   private readonly stopStreamButton: HTMLButtonElement;
   private readonly video: HTMLVideoElement;
+  private readonly annotationButton: HTMLButtonElement;
+  private readonly annotationStatus: HTMLOutputElement;
+  private readonly annotationImage: HTMLImageElement;
   private readonly messages: HTMLOListElement;
   private readonly unsubscribe: () => void;
   private readonly unsubscribeCamera: (() => void) | null;
   private readonly unsubscribeStream: (() => void) | null;
   private cameraState: CameraState | null;
   private streamState: FrameStreamState | null;
+  private supportsAnnotations = false;
+  private annotationUrl: string | null = null;
+  private readonly objectUrls: ObjectUrlApi;
+  private destroyed = false;
 
   constructor(
     private readonly root: HTMLElement,
@@ -51,12 +63,14 @@ export class DiagnosticDashboard {
     private readonly options: DiagnosticDashboardOptions = {},
   ) {
     this.cameraState = this.options.camera?.getState() ?? null;
+    this.objectUrls = this.options.objectUrls ?? URL;
     this.streamState = this.options.stream?.getState() ?? null;
     this.root.innerHTML = `<main class="diagnostic-dashboard" aria-labelledby="dashboard-title">
       <header><p class="eyebrow">GestureBoard Pro</p><h1 id="dashboard-title">Protocol diagnostics</h1><output class="connection-status" aria-live="polite" aria-atomic="true"></output></header>
       <section aria-labelledby="connection-controls-title"><h2 id="connection-controls-title">Connection</h2><p class="connection-url"></p><div class="controls"><button type="button" data-action="connect">Connect</button><button type="button" data-action="disconnect">Disconnect</button><button type="button" data-action="ping">Send ping</button><button type="button" data-action="reset">Reset runtime</button></div></section>
       <section class="camera-panel" aria-labelledby="camera-title"><h2 id="camera-title">Camera capture</h2><video class="camera-preview" autoplay muted playsinline aria-label="Local camera preview"></video><output class="camera-status" aria-live="polite" aria-atomic="true"></output><div class="controls"><button type="button" data-action="start-camera" aria-label="Start camera">Start Camera</button><button type="button" data-action="stop-camera" aria-label="Stop camera">Stop Camera</button><button type="button" data-action="start-stream" aria-label="Start frame streaming">Start Streaming</button><button type="button" data-action="stop-stream" aria-label="Stop frame streaming">Stop Streaming</button></div></section>
       <section aria-labelledby="stream-diagnostics-title"><h2 id="stream-diagnostics-title">Streaming diagnostics</h2><output class="stream-status" aria-live="polite" aria-atomic="true"></output><div class="stream-diagnostics"></div></section>
+      <section aria-labelledby="annotation-title"><h2 id="annotation-title">Annotated feedback</h2><button type="button" data-action="annotation" aria-label="Enable annotated frame feedback">Enable annotated feedback</button><output class="annotation-status" aria-live="polite"></output><img class="annotated-preview" alt="Latest annotated gesture frame" /><p class="annotation-diagnostics"></p></section>
       <section aria-labelledby="message-log-title"><h2 id="message-log-title">Message log</h2><ol class="message-log" aria-live="polite" aria-relevant="additions"></ol></section>
     </main>`;
     this.status = this.element(".connection-status");
@@ -72,6 +86,9 @@ export class DiagnosticDashboard {
     this.startStreamButton = this.element('[data-action="start-stream"]');
     this.stopStreamButton = this.element('[data-action="stop-stream"]');
     this.video = this.element(".camera-preview");
+    this.annotationButton = this.element('[data-action="annotation"]');
+    this.annotationStatus = this.element(".annotation-status");
+    this.annotationImage = this.element(".annotated-preview");
     this.messages = this.element(".message-log");
     this.element<HTMLParagraphElement>(".connection-url").textContent =
       this.client.url;
@@ -92,6 +109,9 @@ export class DiagnosticDashboard {
     this.stopStreamButton.addEventListener("click", () =>
       this.options.stream?.stop(),
     );
+    this.annotationButton.addEventListener("click", () =>
+      this.toggleAnnotations(),
+    );
     this.unsubscribe = this.client.subscribe((event) =>
       this.handleEvent(event),
     );
@@ -107,13 +127,17 @@ export class DiagnosticDashboard {
     this.renderState(this.client.getState());
     this.renderCamera();
     this.renderStream();
+    this.renderAnnotation();
   }
 
   destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
     this.unsubscribe();
     this.unsubscribeCamera?.();
     this.unsubscribeStream?.();
     this.options.camera?.detachPreview();
+    this.clearAnnotation();
     this.root.replaceChildren();
   }
   private async connect(): Promise<void> {
@@ -156,10 +180,26 @@ export class DiagnosticDashboard {
   private handleEvent(event: GestureWebSocketClientEvent): void {
     if (event.type === "state.changed") {
       if (event.state !== "OPEN") this.options.stream?.stop();
+      if (event.state !== "OPEN") {
+        this.supportsAnnotations = false;
+        this.clearAnnotation();
+      }
       this.renderState(event.state);
-    } else if (event.type === "protocol.message")
+    } else if (event.type === "protocol.message") {
+      if (event.message.type === "connection.ready")
+        this.supportsAnnotations =
+          event.message.capabilities?.includes("annotated_frame.jpeg.v1") ??
+          false;
+      if (
+        event.message.type === "annotated_frame.set.ack" &&
+        !event.message.enabled
+      )
+        this.clearAnnotation();
       this.append(event.message.type, this.messageSummary(event.message));
-    else if (event.type === "protocol.error" || event.type === "socket.error")
+      this.renderAnnotation();
+    } else if (event.type === "annotated-frame") {
+      this.showAnnotation(event.frame);
+    } else if (event.type === "protocol.error" || event.type === "socket.error")
       this.append(event.error.code, event.error.message);
     else
       this.append(
@@ -188,6 +228,7 @@ export class DiagnosticDashboard {
     this.pingButton.disabled = !connected;
     this.resetButton.disabled = !connected;
     this.renderCamera();
+    this.renderAnnotation();
   }
   private renderCamera(): void {
     const state = this.cameraState;
@@ -230,6 +271,44 @@ export class DiagnosticDashboard {
     this.messages.prepend(entry);
     while (this.messages.children.length > MAXIMUM_LOG_ENTRIES)
       this.messages.lastElementChild?.remove();
+  }
+  private toggleAnnotations(): void {
+    try {
+      this.client.setAnnotatedFramesEnabled(
+        !this.client.getAnnotatedFramesEnabled(),
+      );
+    } catch (error) {
+      this.append("Annotation control failed", this.errorMessage(error));
+    }
+  }
+  private renderAnnotation(): void {
+    const enabled = this.client.getAnnotatedFramesEnabled();
+    this.annotationButton.disabled =
+      this.client.getState() !== "OPEN" || !this.supportsAnnotations;
+    this.annotationButton.textContent = enabled
+      ? "Disable annotated feedback"
+      : "Enable annotated feedback";
+    this.annotationStatus.textContent = this.supportsAnnotations
+      ? `Annotation feedback: ${enabled ? "enabled" : "disabled"}`
+      : "Annotation feedback unavailable";
+  }
+  private showAnnotation(frame: AnnotatedFrameMessage): void {
+    this.clearAnnotation();
+    const url = this.objectUrls.createObjectURL(frame.blob);
+    this.annotationUrl = url;
+    this.annotationImage.src = url;
+    this.annotationStatus.textContent = "Annotation feedback: frame available";
+    this.element<HTMLParagraphElement>(".annotation-diagnostics").textContent =
+      `Sequence ${frame.sequence}; ${frame.width}×${frame.height}; ${frame.size} bytes.`;
+  }
+  private clearAnnotation(): void {
+    if (this.annotationUrl) this.objectUrls.revokeObjectURL(this.annotationUrl);
+    this.annotationUrl = null;
+    if (this.annotationImage) this.annotationImage.removeAttribute("src");
+    const diagnostics = this.root.querySelector<HTMLParagraphElement>(
+      ".annotation-diagnostics",
+    );
+    if (diagnostics) diagnostics.textContent = "No annotated frame received.";
   }
   private messageSummary(message: ServerMessage): string {
     if (message.type === "gesture.result")

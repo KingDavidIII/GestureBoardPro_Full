@@ -40,6 +40,7 @@ class GestureConsumer(AsyncWebsocketConsumer):
             {
                 "protocol_version": PROTOCOL_VERSION,
                 "type": WebSocketProtocolMessageType.CONNECTION_READY.value,
+                "capabilities": ["annotated_frame.jpeg.v1"],
             }
         )
 
@@ -65,10 +66,15 @@ class GestureConsumer(AsyncWebsocketConsumer):
 
     async def _receive_frame(self, payload: bytes) -> None:
         try:
-            response = await sync_to_async(
-                self.bridge.process_frame,
-                thread_sensitive=True,
-            )(payload)
+            process_response = getattr(self.bridge, "process_frame_response", None)
+            if callable(process_response):
+                response = await sync_to_async(process_response, thread_sensitive=True)(
+                    payload
+                )
+            else:
+                response = await sync_to_async(
+                    self.bridge.process_frame, thread_sensitive=True
+                )(payload)
         except WebSocketRuntimeBridgeError as error:
             await self._send_error(error.code, error.public_message)
         except Exception:
@@ -77,7 +83,12 @@ class GestureConsumer(AsyncWebsocketConsumer):
                 "An internal error occurred while processing the frame.",
             )
         else:
-            await self.send_json(dict(response))
+            if isinstance(response, dict):
+                await self.send_json(response)
+            else:
+                await self.send_json(dict(response.metadata))
+                if response.annotated_envelope is not None:
+                    await self.send(bytes_data=response.annotated_envelope)
 
     async def _receive_control(self, text_data: str) -> None:
         try:
@@ -116,6 +127,33 @@ class GestureConsumer(AsyncWebsocketConsumer):
             return
 
         message_type = payload.get("type")
+        if message_type == WebSocketProtocolMessageType.ANNOTATED_FRAME_SET.value:
+            enabled = payload.get("enabled")
+            if not isinstance(enabled, bool):
+                await self._send_error(
+                    WebSocketProtocolErrorCode.INVALID_ANNOTATION_CONTROL,
+                    "enabled must be a boolean.",
+                    request_id=request_id,
+                )
+                return
+            try:
+                await sync_to_async(
+                    self.bridge.set_annotation_enabled, thread_sensitive=True
+                )(enabled)
+            except WebSocketRuntimeBridgeError as error:
+                await self._send_error(
+                    error.code, error.public_message, request_id=request_id
+                )
+                return
+            response: dict[str, object] = {
+                "protocol_version": PROTOCOL_VERSION,
+                "type": WebSocketProtocolMessageType.ANNOTATED_FRAME_SET_ACK.value,
+                "enabled": enabled,
+            }
+            if request_id is not None:
+                response["request_id"] = request_id
+            await self.send_json(response)
+            return
         if message_type == WebSocketProtocolMessageType.PING.value:
             response: dict[str, object] = {
                 "protocol_version": PROTOCOL_VERSION,
