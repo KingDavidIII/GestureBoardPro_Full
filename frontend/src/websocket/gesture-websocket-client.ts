@@ -1,4 +1,9 @@
-import { PROTOCOL_VERSION, parseServerMessage } from "../protocol";
+import {
+  PROTOCOL_VERSION,
+  decodeAnnotatedFrameEnvelope,
+  parseServerMessage,
+} from "../protocol";
+import type { AnnotatedFrameMessage } from "../protocol";
 import type { ClientControlMessage, ServerMessage } from "../protocol";
 import {
   WebSocketClientState,
@@ -67,6 +72,8 @@ export class GestureWebSocketClient {
   private socket: WebSocketLike | null = null;
   private lastMessage: ServerMessage | null = null;
   private lastError: GestureWebSocketClientError | null = null;
+  private annotatedFramesEnabled = false;
+  private latestAnnotatedFrame: AnnotatedFrameMessage | null = null;
   private pendingResolve: (() => void) | null = null;
   private pendingReject:
     | ((reason: GestureWebSocketClientError) => void)
@@ -81,15 +88,20 @@ export class GestureWebSocketClient {
   private readonly onMessage: EventListener = (event) => {
     const data = (event as MessageEvent<unknown>).data;
     if (typeof data !== "string") {
-      this.reportProtocolError(
-        GestureWebSocketClientErrorCode.UNSUPPORTED_SERVER_MESSAGE,
-        "Binary server messages are not supported.",
-      );
+      if (data instanceof ArrayBuffer || data instanceof Blob)
+        void this.handleAnnotatedFrame(data);
+      else
+        this.reportProtocolError(
+          GestureWebSocketClientErrorCode.UNSUPPORTED_SERVER_MESSAGE,
+          "Binary server messages are not supported.",
+        );
       return;
     }
     try {
       const message = parseServerMessage(data);
       this.lastMessage = message;
+      if (message.type === "annotated_frame.set.ack")
+        this.annotatedFramesEnabled = message.enabled;
       this.emit(Object.freeze({ type: "protocol.message", message }));
     } catch (error) {
       const code =
@@ -121,6 +133,8 @@ export class GestureWebSocketClient {
   private readonly onClose: EventListener = (event) => {
     const closeEvent = event as CloseEvent;
     this.disposeSocket(false);
+    this.annotatedFramesEnabled = false;
+    this.latestAnnotatedFrame = null;
     this.setState(WebSocketClientState.CLOSED);
     this.emit(
       Object.freeze({
@@ -219,6 +233,8 @@ export class GestureWebSocketClient {
       this.clearPending();
     }
     this.setState(WebSocketClientState.CLOSED);
+    this.annotatedFramesEnabled = false;
+    this.latestAnnotatedFrame = null;
   }
 
   sendPing(requestId?: string): void {
@@ -243,6 +259,23 @@ export class GestureWebSocketClient {
         "Frame exceeds the outbound size limit.",
       );
     this.send(payload);
+  }
+
+  setAnnotatedFramesEnabled(enabled: boolean, requestId?: string): void {
+    if (typeof enabled !== "boolean")
+      throw this.clientError(
+        GestureWebSocketClientErrorCode.INVALID_CONTROL_MESSAGE,
+        "enabled must be a boolean.",
+      );
+    this.sendControl(
+      this.controlMessage("annotated_frame.set", requestId, enabled),
+    );
+  }
+  getAnnotatedFramesEnabled(): boolean {
+    return this.annotatedFramesEnabled;
+  }
+  getLatestAnnotatedFrame(): AnnotatedFrameMessage | null {
+    return this.latestAnnotatedFrame;
   }
 
   subscribe(listener: GestureWebSocketClientListener): () => void {
@@ -270,6 +303,7 @@ export class GestureWebSocketClient {
   private controlMessage(
     type: ClientControlMessage["type"],
     requestId?: string,
+    enabled?: boolean,
   ): ClientControlMessage {
     if (requestId !== undefined) {
       if (
@@ -286,9 +320,33 @@ export class GestureWebSocketClient {
         protocol_version: PROTOCOL_VERSION,
         type,
         request_id: requestId,
+        ...(type === "annotated_frame.set" ? { enabled } : {}),
       } as ClientControlMessage;
     }
-    return { protocol_version: PROTOCOL_VERSION, type } as ClientControlMessage;
+    return {
+      protocol_version: PROTOCOL_VERSION,
+      type,
+      ...(type === "annotated_frame.set" ? { enabled } : {}),
+    } as ClientControlMessage;
+  }
+
+  private async handleAnnotatedFrame(data: ArrayBuffer | Blob): Promise<void> {
+    try {
+      const frame = await decodeAnnotatedFrameEnvelope(data);
+      if (
+        this.latestAnnotatedFrame &&
+        frame.sequence <= this.latestAnnotatedFrame.sequence
+      )
+        return;
+      this.latestAnnotatedFrame = frame;
+      this.emit(Object.freeze({ type: "annotated-frame", frame }));
+    } catch (cause) {
+      this.reportProtocolError(
+        GestureWebSocketClientErrorCode.INVALID_PROTOCOL_MESSAGE,
+        "Invalid annotated frame envelope.",
+        cause,
+      );
+    }
   }
 
   private sendControl(message: ClientControlMessage): void {

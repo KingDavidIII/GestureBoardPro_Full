@@ -11,6 +11,11 @@ from typing import Any, Protocol
 import cv2
 import numpy as np
 
+from .annotated_frame_encoder import (
+    ANNOTATED_FRAME_ENVELOPE_VERSION,
+    AnnotatedFrameBinaryEnvelope,
+    AnnotatedFrameEncoder,
+)
 from .gesture_engine import GestureObservation
 from .gesture_runtime import GestureRuntime, GestureRuntimeResult
 
@@ -32,6 +37,8 @@ class WebSocketProtocolMessageType(StrEnum):
     PONG = "pong"
     RUNTIME_RESET = "runtime.reset"
     RUNTIME_RESET_ACK = "runtime.reset.ack"
+    ANNOTATED_FRAME_SET = "annotated_frame.set"
+    ANNOTATED_FRAME_SET_ACK = "annotated_frame.set.ack"
 
 
 class WebSocketProtocolErrorCode(StrEnum):
@@ -43,6 +50,8 @@ class WebSocketProtocolErrorCode(StrEnum):
     RUNTIME_FAILURE = "runtime_failure"
     RESET_FAILURE = "reset_failure"
     INTERNAL_ERROR = "internal_error"
+    INVALID_ANNOTATION_CONTROL = "invalid_annotation_control"
+    ANNOTATION_ENCODING_FAILED = "annotation_encoding_failed"
 
 
 class WebSocketRuntimeBridgeError(RuntimeError):
@@ -109,6 +118,13 @@ class FrameDecoder(Protocol):
     def decode(self, payload: bytes) -> np.ndarray: ...
 
 
+@dataclass(frozen=True, slots=True)
+class WebSocketFrameResponse:
+    metadata: Mapping[str, object]
+    sequence: int
+    annotated_envelope: bytes | None = None
+
+
 class OpenCVFrameDecoder:
     """Decode JPEG/PNG-style encoded bytes into a three-channel BGR frame."""
 
@@ -168,6 +184,7 @@ class WebSocketRuntimeBridge:
         runtime: GestureRuntime | None = None,
         decoder: FrameDecoder | None = None,
         config: WebSocketRuntimeBridgeConfig | None = None,
+        annotated_frame_encoder: AnnotatedFrameEncoder | None = None,
     ) -> None:
         self.config = config or WebSocketRuntimeBridgeConfig()
         self.runtime = runtime if runtime is not None else GestureRuntime()
@@ -181,6 +198,11 @@ class WebSocketRuntimeBridge:
         )
         self._owns_runtime = runtime is None
         self._owns_decoder = decoder is None
+        self.annotated_frame_encoder = (
+            annotated_frame_encoder or AnnotatedFrameEncoder()
+        )
+        self._owns_annotated_frame_encoder = annotated_frame_encoder is None
+        self._annotation_enabled = False
         self._last_sequence: int | None = None
         self._closed = False
 
@@ -191,6 +213,17 @@ class WebSocketRuntimeBridge:
         timestamp: float | None = None,
         sequence: int | None = None,
     ) -> Mapping[str, object]:
+        return self.process_frame_response(
+            payload, timestamp=timestamp, sequence=sequence
+        ).metadata
+
+    def process_frame_response(
+        self,
+        payload: bytes,
+        *,
+        timestamp: float | None = None,
+        sequence: int | None = None,
+    ) -> WebSocketFrameResponse:
         self._ensure_open("process a frame")
         self._validate_payload(payload)
         next_sequence = self._sequence(sequence)
@@ -233,8 +266,51 @@ class WebSocketRuntimeBridge:
                 WebSocketProtocolErrorCode.INTERNAL_ERROR,
                 "Runtime result could not be serialised.",
             ) from error
+        envelope: bytes | None = None
+        annotation: dict[str, object] = {
+            "enabled": self._annotation_enabled,
+            "available": False,
+        }
+        if self._annotation_enabled:
+            try:
+                encoded = self.annotated_frame_encoder.encode(
+                    runtime_result.annotated_frame
+                )
+                envelope = AnnotatedFrameBinaryEnvelope(
+                    next_sequence, encoded.width, encoded.height, encoded.jpeg_bytes
+                ).to_bytes()
+                annotation = {
+                    "enabled": True,
+                    "available": True,
+                    "format": "jpeg",
+                    "envelope_version": ANNOTATED_FRAME_ENVELOPE_VERSION,
+                    "sequence": next_sequence,
+                    "width": encoded.width,
+                    "height": encoded.height,
+                    "byte_length": encoded.payload_size,
+                }
+            except Exception:
+                annotation = {
+                    "enabled": True,
+                    "available": False,
+                    "error_code": WebSocketProtocolErrorCode.ANNOTATION_ENCODING_FAILED.value,
+                }
+        result["annotation"] = annotation
         self._last_sequence = next_sequence
-        return result
+        return WebSocketFrameResponse(result, next_sequence, envelope)
+
+    @property
+    def is_annotation_enabled(self) -> bool:
+        return self._annotation_enabled
+
+    def set_annotation_enabled(self, enabled: bool) -> None:
+        if not isinstance(enabled, bool):
+            raise WebSocketRuntimeBridgeError(
+                WebSocketRuntimeBridgeStage.PAYLOAD_VALIDATION,
+                WebSocketProtocolErrorCode.INVALID_ANNOTATION_CONTROL,
+                "enabled must be a bool.",
+            )
+        self._annotation_enabled = enabled
 
     def _validate_payload(self, payload: bytes) -> None:
         if not isinstance(payload, bytes):
@@ -348,6 +424,7 @@ class WebSocketRuntimeBridge:
         for dependency, owned in (
             (self.runtime, self._owns_runtime),
             (self.decoder, self._owns_decoder),
+            (self.annotated_frame_encoder, self._owns_annotated_frame_encoder),
         ):
             close = getattr(dependency, "close", None)
             if owned and callable(close):

@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 from django.test import SimpleTestCase
 
+from gestureboard.services.annotated_frame_encoder import AnnotatedFrameEncodingResult
 from gestureboard.services.gesture_classifier import (
     FingerState,
     GestureFeatures,
@@ -123,6 +124,46 @@ class BridgeProcessingTests(SimpleTestCase):
         self.runtime.process.return_value = runtime_result()
         self.decoder = FakeDecoder()
         self.bridge = WebSocketRuntimeBridge(self.runtime, self.decoder)
+
+    def test_annotation_is_opt_in_and_response_uses_the_same_sequence(self) -> None:
+        encoder = MagicMock()
+        encoder.encode.return_value = AnnotatedFrameEncodingResult(b"jpeg", 4, 3, 4)
+        bridge = WebSocketRuntimeBridge(
+            self.runtime, self.decoder, annotated_frame_encoder=encoder
+        )
+        disabled = bridge.process_frame_response(b"one")
+        self.assertFalse(disabled.metadata["annotation"]["enabled"])
+        encoder.encode.assert_not_called()
+        bridge.set_annotation_enabled(True)
+        enabled = bridge.process_frame_response(b"two")
+        self.assertTrue(bridge.is_annotation_enabled)
+        self.assertEqual(enabled.metadata["sequence"], enabled.sequence)
+        self.assertEqual(enabled.metadata["annotation"]["sequence"], enabled.sequence)
+        self.assertIsNotNone(enabled.annotated_envelope)
+        encoder.encode.assert_called_once_with(
+            self.runtime.process.return_value.annotated_frame
+        )
+
+    def test_annotation_encoding_failure_preserves_metadata(self) -> None:
+        encoder = MagicMock()
+        encoder.encode.side_effect = RuntimeError("private failure")
+        bridge = WebSocketRuntimeBridge(
+            self.runtime, self.decoder, annotated_frame_encoder=encoder
+        )
+        bridge.set_annotation_enabled(True)
+        response = bridge.process_frame_response(b"frame")
+        self.assertEqual(response.metadata["type"], "gesture.result")
+        self.assertEqual(
+            response.metadata["annotation"],
+            {
+                "enabled": True,
+                "available": False,
+                "error_code": "annotation_encoding_failed",
+            },
+        )
+        self.assertIsNone(response.annotated_envelope)
+        with self.assertRaises(WebSocketRuntimeBridgeError):
+            bridge.set_annotation_enabled(1)
 
     def test_valid_bytes_decode_and_process_exactly_once(self) -> None:
         payload = b"encoded-image"

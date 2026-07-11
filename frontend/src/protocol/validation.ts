@@ -78,6 +78,11 @@ const finite = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
 const nonNegativeInteger = (value: unknown): value is number =>
   finite(value) && Number.isInteger(value) && value >= 0;
+const boundedInteger = (
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): boolean => nonNegativeInteger(value) && value >= minimum && value <= maximum;
 const optionalRequestId = (value: unknown): value is string | undefined =>
   value === undefined ||
   (typeof value === "string" && value.length > 0 && value.length <= 128);
@@ -87,6 +92,37 @@ function invalid(message: string): never {
     FrontendProtocolErrorCode.INVALID_PROTOCOL_MESSAGE,
     message,
   );
+}
+
+function validateAnnotation(value: unknown): void {
+  if (
+    !record(value) ||
+    typeof value.enabled !== "boolean" ||
+    typeof value.available !== "boolean"
+  )
+    invalid("Invalid annotation metadata.");
+  if (!value.enabled && value.available)
+    invalid("Disabled annotation cannot be available.");
+  if (!value.available) {
+    if (
+      value.error !== undefined &&
+      (typeof value.error !== "string" ||
+        !value.error.trim() ||
+        value.error.length > 128)
+    )
+      invalid("Invalid annotation error.");
+    return;
+  }
+  if (
+    value.enabled !== true ||
+    value.format !== "jpeg" ||
+    value.envelope_version !== 1 ||
+    !boundedInteger(value.sequence, 0, 0xffffffff) ||
+    !boundedInteger(value.width, 1, 0xffff) ||
+    !boundedInteger(value.height, 1, 0xffff) ||
+    !boundedInteger(value.byte_length, 1, 5 * 1024 * 1024)
+  )
+    invalid("Invalid available annotation metadata.");
 }
 
 function validateGestureResult(
@@ -142,6 +178,7 @@ function validateGestureResult(
       typeof dispatch.executed !== "boolean")
   )
     invalid("Invalid dispatch metadata.");
+  if (value.annotation !== undefined) validateAnnotation(value.annotation);
   return value as unknown as GestureResultMessage;
 }
 
@@ -156,12 +193,27 @@ export function validateServerMessage(value: unknown): ServerMessage {
   if (typeof value.type !== "string") invalid("Message type is required.");
   switch (value.type) {
     case "connection.ready":
+      if (
+        value.capabilities !== undefined &&
+        (!Array.isArray(value.capabilities) ||
+          value.capabilities.some(
+            (capability) => typeof capability !== "string",
+          ))
+      )
+        invalid("Invalid capabilities.");
       return value as unknown as ServerMessage;
     case "gesture.result":
       return validateGestureResult(value);
     case "pong":
     case "runtime.reset.ack":
       if (!optionalRequestId(value.request_id)) invalid("Invalid request_id.");
+      return value as unknown as ServerMessage;
+    case "annotated_frame.set.ack":
+      if (
+        typeof value.enabled !== "boolean" ||
+        !optionalRequestId(value.request_id)
+      )
+        invalid("Invalid annotation acknowledgement.");
       return value as unknown as ServerMessage;
     case "error": {
       if (

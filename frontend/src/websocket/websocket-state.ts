@@ -1,4 +1,5 @@
 import type { ServerMessage } from "../protocol";
+import type { AnnotatedFrameMessage } from "../protocol";
 import type { GestureWebSocketClientError } from "./gesture-websocket-client";
 
 export enum WebSocketClientState {
@@ -13,6 +14,7 @@ export enum WebSocketClientState {
 export type GestureWebSocketClientEvent =
   | { readonly type: "state.changed"; readonly state: WebSocketClientState }
   | { readonly type: "protocol.message"; readonly message: ServerMessage }
+  | { readonly type: "annotated-frame"; readonly frame: AnnotatedFrameMessage }
   | {
       readonly type: "protocol.error";
       readonly error: GestureWebSocketClientError;

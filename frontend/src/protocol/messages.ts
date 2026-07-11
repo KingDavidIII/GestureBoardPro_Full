@@ -47,6 +47,7 @@ export type GestureEngineDecision =
 export interface ConnectionReadyMessage {
   readonly protocol_version: ProtocolVersion;
   readonly type: "connection.ready";
+  readonly capabilities?: readonly string[];
 }
 
 export interface GestureSelectionMetadata {
@@ -85,6 +86,17 @@ export interface GestureResultMessage {
   readonly gesture: GestureMetadata;
   readonly action_executed: boolean;
   readonly dispatch: DispatchMetadata | null;
+  readonly annotation?: {
+    readonly enabled: boolean;
+    readonly available: boolean;
+    readonly format?: "jpeg";
+    readonly envelope_version?: number;
+    readonly sequence?: number;
+    readonly width?: number;
+    readonly height?: number;
+    readonly byte_length?: number;
+    readonly error_code?: string;
+  };
 }
 
 export interface PongMessage {
@@ -96,6 +108,12 @@ export interface PongMessage {
 export interface RuntimeResetAckMessage {
   readonly protocol_version: ProtocolVersion;
   readonly type: "runtime.reset.ack";
+  readonly request_id?: string;
+}
+export interface AnnotatedFrameSetAckMessage {
+  readonly protocol_version: ProtocolVersion;
+  readonly type: "annotated_frame.set.ack";
+  readonly enabled: boolean;
   readonly request_id?: string;
 }
 
@@ -114,6 +132,7 @@ export type ServerMessage =
   | GestureResultMessage
   | PongMessage
   | RuntimeResetAckMessage
+  | AnnotatedFrameSetAckMessage
   | ErrorMessage;
 
 export interface PingMessage {
@@ -127,5 +146,14 @@ export interface RuntimeResetMessage {
   readonly type: "runtime.reset";
   readonly request_id?: string;
 }
+export interface AnnotatedFrameSetMessage {
+  readonly protocol_version: ProtocolVersion;
+  readonly type: "annotated_frame.set";
+  readonly enabled: boolean;
+  readonly request_id?: string;
+}
 
-export type ClientControlMessage = PingMessage | RuntimeResetMessage;
+export type ClientControlMessage =
+  | PingMessage
+  | RuntimeResetMessage
+  | AnnotatedFrameSetMessage;
