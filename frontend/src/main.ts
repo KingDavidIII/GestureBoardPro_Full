@@ -22,7 +22,7 @@ new DiagnosticDashboard(root, client, {
 const shutdown = (): void => {
   stream.stop();
   camera.stop();
-  client.disconnect();
+  client.destroy();
 };
 addEventListener("pagehide", shutdown);
 addEventListener("beforeunload", shutdown);

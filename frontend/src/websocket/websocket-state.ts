@@ -16,6 +16,15 @@ export type GestureWebSocketClientEvent =
   | { readonly type: "protocol.message"; readonly message: ServerMessage }
   | { readonly type: "annotated-frame"; readonly frame: AnnotatedFrameMessage }
   | {
+      readonly type: "reconnect.scheduled";
+      readonly attempt: number;
+      readonly delayMs: number;
+    }
+  | { readonly type: "reconnect.started"; readonly attempt: number }
+  | { readonly type: "reconnect.succeeded"; readonly attempt: number }
+  | { readonly type: "reconnect.exhausted"; readonly attempts: number }
+  | { readonly type: "reconnect.cancelled"; readonly reason: string }
+  | {
       readonly type: "protocol.error";
       readonly error: GestureWebSocketClientError;
     }
