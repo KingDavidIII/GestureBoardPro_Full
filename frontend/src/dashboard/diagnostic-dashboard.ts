@@ -4,6 +4,7 @@ import {
   type CameraEvent,
 } from "../camera";
 import type { AnnotatedFrameMessage, ServerMessage } from "../protocol";
+import type { SchedulerMetadata } from "../protocol/messages";
 import {
   FrameStreamState,
   type FrameStreamController,
@@ -34,6 +35,7 @@ export class DiagnosticDashboard {
   private readonly cameraStatus: HTMLOutputElement;
   private readonly streamStatus: HTMLOutputElement;
   private readonly diagnostics: HTMLDivElement;
+  private readonly serverDiagnostics: HTMLDivElement;
   private readonly connectButton: HTMLButtonElement;
   private readonly disconnectButton: HTMLButtonElement;
   private readonly pingButton: HTMLButtonElement;
@@ -57,6 +59,7 @@ export class DiagnosticDashboard {
   private readonly objectUrls: ObjectUrlApi;
   private destroyed = false;
   private reconnectPending = false;
+  private schedulerMetrics: SchedulerMetadata | null = null;
 
   constructor(
     private readonly root: HTMLElement,
@@ -71,6 +74,7 @@ export class DiagnosticDashboard {
       <section aria-labelledby="connection-controls-title"><h2 id="connection-controls-title">Connection</h2><p class="connection-url"></p><div class="controls"><button type="button" data-action="connect">Connect</button><button type="button" data-action="disconnect">Disconnect</button><button type="button" data-action="ping">Send ping</button><button type="button" data-action="reset">Reset runtime</button></div></section>
       <section class="camera-panel" aria-labelledby="camera-title"><h2 id="camera-title">Camera capture</h2><video class="camera-preview" autoplay muted playsinline aria-label="Local camera preview"></video><output class="camera-status" aria-live="polite" aria-atomic="true"></output><div class="controls"><button type="button" data-action="start-camera" aria-label="Start camera">Start Camera</button><button type="button" data-action="stop-camera" aria-label="Stop camera">Stop Camera</button><button type="button" data-action="start-stream" aria-label="Start frame streaming">Start Streaming</button><button type="button" data-action="stop-stream" aria-label="Stop frame streaming">Stop Streaming</button></div></section>
       <section aria-labelledby="stream-diagnostics-title"><h2 id="stream-diagnostics-title">Streaming diagnostics</h2><output class="stream-status" aria-live="polite" aria-atomic="true"></output><div class="stream-diagnostics"></div></section>
+      <section aria-labelledby="server-scheduling-title"><h2 id="server-scheduling-title">Server-side frame scheduling</h2><div class="server-scheduler-diagnostics"></div></section>
       <section aria-labelledby="annotation-title"><h2 id="annotation-title">Annotated feedback</h2><button type="button" data-action="annotation" aria-label="Enable annotated frame feedback">Enable annotated feedback</button><output class="annotation-status" aria-live="polite"></output><img class="annotated-preview" alt="Latest annotated gesture frame" /><p class="annotation-diagnostics"></p></section>
       <section aria-labelledby="message-log-title"><h2 id="message-log-title">Message log</h2><ol class="message-log" aria-live="polite" aria-relevant="additions"></ol></section>
     </main>`;
@@ -78,6 +82,7 @@ export class DiagnosticDashboard {
     this.cameraStatus = this.element(".camera-status");
     this.streamStatus = this.element(".stream-status");
     this.diagnostics = this.element(".stream-diagnostics");
+    this.serverDiagnostics = this.element(".server-scheduler-diagnostics");
     this.connectButton = this.element('[data-action="connect"]');
     this.disconnectButton = this.element('[data-action="disconnect"]');
     this.pingButton = this.element('[data-action="ping"]');
@@ -128,6 +133,7 @@ export class DiagnosticDashboard {
     this.renderState(this.client.getState());
     this.renderCamera();
     this.renderStream();
+    this.renderServerScheduler();
     this.renderAnnotation();
   }
 
@@ -188,6 +194,8 @@ export class DiagnosticDashboard {
       if (event.state !== "OPEN") {
         this.supportsAnnotations = false;
         this.clearAnnotation();
+        this.schedulerMetrics = null;
+        this.renderServerScheduler();
       }
       this.renderState(event.state);
     } else if (event.type === "protocol.message") {
@@ -200,6 +208,10 @@ export class DiagnosticDashboard {
         !event.message.enabled
       )
         this.clearAnnotation();
+      if (event.message.type === "gesture.result") {
+        this.schedulerMetrics = event.message.scheduler ?? null;
+        this.renderServerScheduler();
+      }
       this.append(event.message.type, this.messageSummary(event.message));
       this.renderAnnotation();
     } else if (event.type === "annotated-frame") {
@@ -292,6 +304,23 @@ export class DiagnosticDashboard {
     const camera = this.options.camera?.getMetadata();
     this.diagnostics.textContent = `Capture: ${camera?.width ?? "?"}×${camera?.height ?? "?"}; target FPS: ${this.options.stream?.targetFps}; JPEG quality: ${this.options.jpegQuality ?? "default"}; maximum frame width: ${this.options.maximumFrameWidth ?? "default"}; effective FPS: ${metrics.effectiveFps.toFixed(1)}; sent: ${metrics.framesSent}; timing drops: ${metrics.framesDroppedForTiming}; backpressure drops: ${metrics.framesDroppedForBackpressure}; encoding failures: ${metrics.encodingFailures}; send failures: ${metrics.sendFailures}; latest size: ${metrics.lastFrameSize ?? 0} bytes; buffered: ${this.client.getBufferedAmount()} bytes.`;
     this.renderCamera();
+  }
+  private renderServerScheduler(): void {
+    const metrics = this.schedulerMetrics;
+    if (!metrics) {
+      this.serverDiagnostics.textContent =
+        "No server scheduler metrics for this connection.";
+      return;
+    }
+    const dropPercentage =
+      metrics.received_frames > 0
+        ? `${((metrics.dropped_frames / metrics.received_frames) * 100).toFixed(1)}%`
+        : "0.0%";
+    const queueDelay = Math.min(metrics.queue_delay_ms, 999999).toFixed(1);
+    const processingTime = Math.min(metrics.processing_time_ms, 999999).toFixed(
+      1,
+    );
+    this.serverDiagnostics.textContent = `Server received: ${metrics.received_frames}; server processed: ${metrics.processed_frames}; server stale frames dropped: ${metrics.dropped_frames}; server processing failures: ${metrics.processing_failures}; server pending depth: ${metrics.pending_frames}; latest queue delay: ${queueDelay} ms; latest processing duration: ${processingTime} ms; server drop percentage: ${dropPercentage}.`;
   }
   private append(title: string, detail: string): void {
     const entry = document.createElement("li");

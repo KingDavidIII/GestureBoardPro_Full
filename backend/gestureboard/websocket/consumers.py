@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
 from asgiref.sync import sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
+from gestureboard.services.latest_frame_scheduler import (
+    FrameSchedulerMetrics,
+    LatestFrameScheduler,
+    LatestFrameSchedulerError,
+)
 from gestureboard.services.websocket_manager import websocket_manager
 from gestureboard.services.websocket_runtime_bridge import (
     WebSocketProtocolErrorCode,
@@ -23,9 +29,12 @@ class GestureConsumer(AsyncWebsocketConsumer):
     """Maintain one ordered, synchronous runtime bridge per connection."""
 
     bridge_factory = staticmethod(WebSocketRuntimeBridge)
+    scheduler_factory = staticmethod(LatestFrameScheduler)
 
     async def connect(self) -> None:
         self._bridge_closed = False
+        self._connection_closed = False
+        self._outbound_lock = asyncio.Lock()
         try:
             self.bridge = await sync_to_async(
                 self.bridge_factory,
@@ -34,9 +43,21 @@ class GestureConsumer(AsyncWebsocketConsumer):
         except Exception:
             await self.close(code=1011)
             return
+        process_response = getattr(self.bridge, "process_frame_response", None)
+        processor = (
+            process_response
+            if callable(process_response)
+            else self.bridge.process_frame
+        )
+        self.scheduler = self.scheduler_factory(
+            processor,
+            self._frame_processed,
+            self._frame_failed,
+        )
+        self.scheduler.start()
         await self.accept()
         await websocket_manager.register(self)
-        await self.send_json(
+        await self._send_json_ordered(
             {
                 "protocol_version": PROTOCOL_VERSION,
                 "type": WebSocketProtocolMessageType.CONNECTION_READY.value,
@@ -45,7 +66,12 @@ class GestureConsumer(AsyncWebsocketConsumer):
         )
 
     async def disconnect(self, close_code: int) -> None:
+        self._connection_closed = True
         await websocket_manager.unregister(self)
+        scheduler = getattr(self, "scheduler", None)
+        if scheduler is not None:
+            await scheduler.close()
+            self.scheduler = None
         await self._close_bridge()
 
     async def receive(
@@ -66,29 +92,54 @@ class GestureConsumer(AsyncWebsocketConsumer):
 
     async def _receive_frame(self, payload: bytes) -> None:
         try:
-            process_response = getattr(self.bridge, "process_frame_response", None)
-            if callable(process_response):
-                response = await sync_to_async(process_response, thread_sensitive=True)(
-                    payload
+            self.scheduler.submit(payload)
+        except (AttributeError, LatestFrameSchedulerError):
+            if not self._connection_closed:
+                await self._send_error(
+                    WebSocketProtocolErrorCode.INTERNAL_ERROR,
+                    "The frame scheduler is unavailable.",
                 )
-            else:
-                response = await sync_to_async(
-                    self.bridge.process_frame, thread_sensitive=True
-                )(payload)
-        except WebSocketRuntimeBridgeError as error:
+
+    async def _frame_processed(
+        self, response: object, metrics: FrameSchedulerMetrics
+    ) -> None:
+        if self._connection_closed:
+            return
+        if isinstance(response, dict):
+            metadata = dict(response)
+            envelope = None
+        else:
+            metadata = dict(response.metadata)  # type: ignore[attr-defined]
+            envelope = response.annotated_envelope  # type: ignore[attr-defined]
+        metadata["scheduler"] = {
+            "received_frames": metrics.received_frames,
+            "processed_frames": metrics.processed_frames,
+            "dropped_frames": metrics.dropped_frames,
+            "processing_failures": metrics.processing_failures,
+            "pending_frames": metrics.pending_frames,
+            "queue_delay_ms": metrics.queue_delay_ms,
+            "processing_time_ms": metrics.processing_time_ms,
+        }
+        async with self._outbound_lock:
+            if self._connection_closed:
+                return
+            await self.send_json(metadata)
+            if envelope is not None and not self._connection_closed:
+                await self.send(bytes_data=envelope)
+
+    async def _frame_failed(
+        self, error: Exception, metrics: FrameSchedulerMetrics
+    ) -> None:
+        del metrics
+        if self._connection_closed:
+            return
+        if isinstance(error, WebSocketRuntimeBridgeError):
             await self._send_error(error.code, error.public_message)
-        except Exception:
+        else:
             await self._send_error(
                 WebSocketProtocolErrorCode.INTERNAL_ERROR,
                 "An internal error occurred while processing the frame.",
             )
-        else:
-            if isinstance(response, dict):
-                await self.send_json(response)
-            else:
-                await self.send_json(dict(response.metadata))
-                if response.annotated_envelope is not None:
-                    await self.send(bytes_data=response.annotated_envelope)
 
     async def _receive_control(self, text_data: str) -> None:
         try:
@@ -152,7 +203,7 @@ class GestureConsumer(AsyncWebsocketConsumer):
             }
             if request_id is not None:
                 response["request_id"] = request_id
-            await self.send_json(response)
+            await self._send_json_ordered(response)
             return
         if message_type == WebSocketProtocolMessageType.PING.value:
             response: dict[str, object] = {
@@ -161,7 +212,7 @@ class GestureConsumer(AsyncWebsocketConsumer):
             }
             if request_id is not None:
                 response["request_id"] = request_id
-            await self.send_json(response)
+            await self._send_json_ordered(response)
             return
         if message_type == WebSocketProtocolMessageType.RUNTIME_RESET.value:
             try:
@@ -186,7 +237,7 @@ class GestureConsumer(AsyncWebsocketConsumer):
             }
             if request_id is not None:
                 response["request_id"] = request_id
-            await self.send_json(response)
+            await self._send_json_ordered(response)
             return
 
         await self._send_error(
@@ -209,7 +260,12 @@ class GestureConsumer(AsyncWebsocketConsumer):
         }
         if request_id is not None:
             response["request_id"] = request_id
-        await self.send_json(response)
+        await self._send_json_ordered(response)
+
+    async def _send_json_ordered(self, payload: dict[str, Any]) -> None:
+        async with self._outbound_lock:
+            if not self._connection_closed:
+                await self.send_json(payload)
 
     async def _close_bridge(self) -> None:
         if self._bridge_closed:

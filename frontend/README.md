@@ -38,6 +38,25 @@ stream scheduler, stops camera tracks, then disconnects the client. The current
 backend processes binary frames sequentially; no annotated-frame return stream
 is implemented in this Alpha.
 
+## Server frame scheduling
+
+Each WebSocket connection accepts one frame in flight plus exactly one pending
+frame. A newer submission replaces the older pending frame, reducing latency
+rather than maximizing processed-frame count. `received_frames` counts every
+transport-accepted submission; `dropped_frames` counts pending frames replaced
+by newer ones; `processed_frames` counts completed attempts; and
+`processing_failures` counts failed attempts. `pending_frames` is always `0`
+or `1`. `queue_delay_ms` is submission-to-processing-start delay and
+`processing_time_ms` is bridge-processing duration.
+
+CPU-bound bridge work is offloaded so text controls remain responsive. JSON and
+optional GBF1 frames are emitted as one ordered response pair. Disconnect
+clears pending work and suppresses late sends; thread work already running may
+finish but its result is ignored. These server counters are connection-local
+and distinct from browser-side drop metrics. There is no global admission
+control, adaptive browser-FPS negotiation, automatic stream resumption, or
+interruption of an in-flight frame.
+
 ## Public API
 
 ```ts
