@@ -7,7 +7,7 @@ import {
   validateServerMessage,
 } from "../src/protocol";
 
-const result = (annotation?: unknown) => ({
+const result = (annotation?: unknown, scheduler?: unknown) => ({
   protocol_version: 1,
   type: "gesture.result",
   sequence: 4,
@@ -26,7 +26,18 @@ const result = (annotation?: unknown) => ({
     executed: true,
   },
   ...(annotation === undefined ? {} : { annotation }),
+  ...(scheduler === undefined ? {} : { scheduler }),
 });
+
+const scheduler = {
+  received_frames: 8,
+  processed_frames: 5,
+  dropped_frames: 2,
+  processing_failures: 1,
+  pending_frames: 1,
+  queue_delay_ms: 12.25,
+  processing_time_ms: 44.5,
+};
 
 describe("protocol validation", () => {
   it("accepts protocol version 1 server messages", () => {
@@ -60,6 +71,34 @@ describe("protocol validation", () => {
     });
 
     expect(message.type).toBe("gesture.result");
+  });
+
+  it("accepts valid scheduler metadata and legacy results without it", () => {
+    expect(validateServerMessage(result()).type).toBe("gesture.result");
+    expect(validateServerMessage(result(undefined, scheduler))).toMatchObject({
+      scheduler,
+    });
+  });
+
+  it.each([
+    null,
+    [],
+    "scheduler",
+    {},
+    { ...scheduler, received_frames: -1 },
+    { ...scheduler, processed_frames: 1.5 },
+    { ...scheduler, dropped_frames: Number.MAX_SAFE_INTEGER + 1 },
+    { ...scheduler, processing_failures: Number.NaN },
+    { ...scheduler, pending_frames: -1 },
+    { ...scheduler, pending_frames: 2 },
+    { ...scheduler, queue_delay_ms: -1 },
+    { ...scheduler, queue_delay_ms: Number.POSITIVE_INFINITY },
+    { ...scheduler, processing_time_ms: Number.NaN },
+    { ...scheduler, processing_time_ms: -0.1 },
+  ])("rejects invalid scheduler metadata %#", (metadata) => {
+    expect(() => validateServerMessage(result(undefined, metadata))).toThrow(
+      FrontendProtocolError,
+    );
   });
 
   it("rejects invalid payloads and protocol versions", () => {

@@ -78,6 +78,8 @@ const finite = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
 const nonNegativeInteger = (value: unknown): value is number =>
   finite(value) && Number.isInteger(value) && value >= 0;
+const nonNegativeSafeInteger = (value: unknown): value is number =>
+  finite(value) && Number.isSafeInteger(value) && value >= 0;
 const boundedInteger = (
   value: unknown,
   minimum: number,
@@ -179,6 +181,22 @@ function validateGestureResult(
   )
     invalid("Invalid dispatch metadata.");
   if (value.annotation !== undefined) validateAnnotation(value.annotation);
+  if (value.scheduler !== undefined) {
+    const scheduler = value.scheduler;
+    if (
+      !record(scheduler) ||
+      !nonNegativeSafeInteger(scheduler.received_frames) ||
+      !nonNegativeSafeInteger(scheduler.processed_frames) ||
+      !nonNegativeSafeInteger(scheduler.dropped_frames) ||
+      !nonNegativeSafeInteger(scheduler.processing_failures) ||
+      (scheduler.pending_frames !== 0 && scheduler.pending_frames !== 1) ||
+      !finite(scheduler.queue_delay_ms) ||
+      scheduler.queue_delay_ms < 0 ||
+      !finite(scheduler.processing_time_ms) ||
+      scheduler.processing_time_ms < 0
+    )
+      invalid("Invalid scheduler metadata.");
+  }
   return value as unknown as GestureResultMessage;
 }
 

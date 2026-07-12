@@ -568,4 +568,80 @@ describe("DiagnosticDashboard", () => {
     expect(root.querySelectorAll("img")).toHaveLength(1);
     expect(root.querySelector("[onerror]")).toBeNull();
   });
+
+  it("renders distinct server scheduler metrics and replaces old values", async () => {
+    root.querySelector<HTMLButtonElement>('[data-action="connect"]')?.click();
+    socket.open();
+    await Promise.resolve();
+    const sendMetrics = (received: number, dropped: number) =>
+      socket.message(
+        JSON.stringify({
+          protocol_version: 1,
+          type: "gesture.result",
+          sequence: received,
+          timestamp: 1,
+          detected_hand_count: 0,
+          selection: { decision: "NO_HANDS", identity: null },
+          hand: null,
+          gesture: { label: null, engine_decision: "NO_HAND" },
+          action_executed: false,
+          dispatch: null,
+          scheduler: {
+            received_frames: received,
+            processed_frames: received - dropped,
+            dropped_frames: dropped,
+            processing_failures: 0,
+            pending_frames: 1,
+            queue_delay_ms: 12.345,
+            processing_time_ms: 45.678,
+          },
+        }),
+      );
+    sendMetrics(10, 2);
+    const server = root.querySelector(".server-scheduler-diagnostics");
+    expect(server?.textContent).toContain("Server received: 10");
+    expect(server?.textContent).toContain("20.0%");
+    expect(server?.textContent).toContain("12.3 ms");
+    expect(server?.textContent).toContain("45.7 ms");
+    expect(root.querySelector(".stream-diagnostics")).not.toBe(server);
+    sendMetrics(20, 5);
+    expect(server?.textContent).toContain("Server received: 20");
+    expect(server?.textContent).not.toContain("Server received: 10");
+  });
+
+  it("resets server metrics on close and keeps them empty after reconnect", async () => {
+    root.querySelector<HTMLButtonElement>('[data-action="connect"]')?.click();
+    socket.open();
+    await Promise.resolve();
+    socket.message(
+      JSON.stringify({
+        protocol_version: 1,
+        type: "gesture.result",
+        sequence: 1,
+        timestamp: 1,
+        detected_hand_count: 0,
+        selection: { decision: "NO_HANDS", identity: null },
+        hand: null,
+        gesture: { label: null, engine_decision: "NO_HAND" },
+        action_executed: false,
+        dispatch: null,
+        scheduler: {
+          received_frames: 1,
+          processed_frames: 1,
+          dropped_frames: 0,
+          processing_failures: 0,
+          pending_frames: 0,
+          queue_delay_ms: 0,
+          processing_time_ms: 1,
+        },
+      }),
+    );
+    socket.remoteClose();
+    const server = root.querySelector(".server-scheduler-diagnostics");
+    expect(server?.textContent).toContain("No server scheduler metrics");
+    reconnectTimers.runNext();
+    sockets[1]?.open();
+    await Promise.resolve();
+    expect(server?.textContent).toContain("No server scheduler metrics");
+  });
 });

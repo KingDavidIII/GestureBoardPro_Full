@@ -75,6 +75,16 @@ export interface DispatchMetadata {
   readonly executed: boolean;
 }
 
+export interface SchedulerMetadata {
+  readonly received_frames: number;
+  readonly processed_frames: number;
+  readonly dropped_frames: number;
+  readonly processing_failures: number;
+  readonly pending_frames: 0 | 1;
+  readonly queue_delay_ms: number;
+  readonly processing_time_ms: number;
+}
+
 export interface GestureResultMessage {
   readonly protocol_version: ProtocolVersion;
   readonly type: "gesture.result";
@@ -86,6 +96,7 @@ export interface GestureResultMessage {
   readonly gesture: GestureMetadata;
   readonly action_executed: boolean;
   readonly dispatch: DispatchMetadata | null;
+  readonly scheduler?: SchedulerMetadata;
   readonly annotation?: {
     readonly enabled: boolean;
     readonly available: boolean;
