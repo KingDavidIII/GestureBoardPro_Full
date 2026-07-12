@@ -53,8 +53,8 @@ const browserScheduler: FrameScheduler = {
 };
 
 export class FrameStreamController {
-  readonly targetFps: number;
   readonly bufferedAmountThreshold: number;
+  private currentTargetFps: number;
   private readonly scheduler: FrameScheduler;
   private readonly now: () => number;
   private readonly subscriberErrorHandler: (error: unknown) => void;
@@ -73,7 +73,7 @@ export class FrameStreamController {
     readonly client: StreamWebSocketClient,
     config: FrameStreamConfig = {},
   ) {
-    this.targetFps = this.positiveNumber(
+    this.currentTargetFps = this.positiveNumber(
       config.targetFps ?? DEFAULT_TARGET_FPS,
       "targetFps",
     );
@@ -162,6 +162,16 @@ export class FrameStreamController {
   }
   getState(): FrameStreamState {
     return this.state;
+  }
+  get targetFps(): number {
+    return this.currentTargetFps;
+  }
+  setTargetFps(targetFps: number): void {
+    const validated = this.positiveNumber(targetFps, "targetFps");
+    if (validated === this.currentTargetFps) return;
+    this.currentTargetFps = validated;
+    this.metrics = { ...this.metrics, targetFps: validated };
+    this.emitMetrics();
   }
   getMetrics(): FrameStreamMetrics {
     return Object.freeze({
@@ -301,6 +311,7 @@ export class FrameStreamController {
   }
   private emptyMetrics(): FrameStreamMetrics {
     return {
+      targetFps: this.currentTargetFps,
       startedAt: null,
       stoppedAt: null,
       framesAttempted: 0,
