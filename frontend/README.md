@@ -147,9 +147,30 @@ reconnection begins, Adaptive mode is disabled, counters regress, or the
 application is destroyed. Reconnection never resumes streaming; the user must
 restart it explicitly, and fresh scheduler samples establish a new baseline.
 
-The dashboard keeps three distinct diagnostic groups: browser capture/send
-metrics, server scheduler metrics, and adaptive-controller decisions. Alpha 6
-changes target FPS only; JPEG quality is not adapted.
+The dashboard keeps browser capture/send metrics, server scheduler metrics, and
+adaptive-controller decisions distinct.
+
+### Adaptive JPEG quality
+
+JPEG quality has its own **Adaptive** and **Fixed** mode, independent of the
+server-pressure FPS controller. The default transport policy starts from the
+configured encoder quality, stays between 0.45 and 0.90, decreases by 0.10,
+and restores 0.05 after 10 consecutive healthy samples. Adjustments have a
+2000 ms cooldown.
+
+Overload priority is send-failure delta, browser backpressure-drop delta,
+WebSocket buffered bytes at 262144, then encoded payload size at 131072 bytes.
+Drop and failure metrics are cumulative, so only positive deltas represent new
+pressure; counter regression starts a fresh epoch. Encoding failures interrupt
+the healthy window without being treated as server pressure.
+
+Quality history resets on socket loss, reconnect start, stream stop, mode
+change, counter regression, and application destruction. The last applied
+quality is preserved across a manual stream restart, while a fresh sample is
+required to establish the new baseline. Reconnection never resumes streaming.
+The dashboard renders browser transport, server scheduler, adaptive FPS, and
+adaptive JPEG-quality metrics separately. Alpha 7 changes only JPEG quality and
+FPS: it does not negotiate codecs or estimate available bandwidth.
 
 ## Testing
 

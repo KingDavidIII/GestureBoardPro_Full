@@ -4,6 +4,7 @@ import { CameraState, type CameraController } from "../src/camera";
 import { DiagnosticDashboard, type ObjectUrlApi } from "../src/dashboard";
 import {
   FrameStreamState,
+  type AdaptiveQualitySnapshot,
   type AdaptiveStreamSnapshot,
   type FrameStreamController,
 } from "../src/streaming";
@@ -67,6 +68,9 @@ describe("DiagnosticDashboard", () => {
   let adaptiveSnapshot: AdaptiveStreamSnapshot;
   let adaptiveListeners: Array<(snapshot: AdaptiveStreamSnapshot) => void>;
   let adaptiveReset: ReturnType<typeof vi.fn>;
+  let qualitySnapshot: AdaptiveQualitySnapshot;
+  let qualityListeners: Array<(snapshot: AdaptiveQualitySnapshot) => void>;
+  let qualityReset: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     root = document.createElement("div");
@@ -115,6 +119,20 @@ describe("DiagnosticDashboard", () => {
     });
     adaptiveListeners = [];
     adaptiveReset = vi.fn();
+    qualitySnapshot = Object.freeze({
+      mode: "adaptive",
+      quality: 0.8,
+      minimumQuality: 0.45,
+      maximumQuality: 0.9,
+      latestDecision: null,
+      healthySamples: 0,
+      overloadSamples: 0,
+      latestPayloadBytes: 0,
+      latestBufferedBytes: 0,
+      cooldownActive: false,
+    });
+    qualityListeners = [];
+    qualityReset = vi.fn();
     const camera = {
       getState: () => CameraState.IDLE,
       getMetadata: () => null,
@@ -182,12 +200,38 @@ describe("DiagnosticDashboard", () => {
           };
         },
       },
+      adaptiveQuality: {
+        getSnapshot: () => qualitySnapshot,
+        setMode: vi.fn((mode) => {
+          qualitySnapshot = Object.freeze({
+            ...qualitySnapshot,
+            mode,
+            latestDecision: null,
+            healthySamples: 0,
+            overloadSamples: 0,
+          });
+          for (const listener of qualityListeners) listener(qualitySnapshot);
+        }),
+        reset: qualityReset,
+        subscribe: (listener) => {
+          qualityListeners.push(listener);
+          return () => {
+            qualityListeners = qualityListeners.filter(
+              (candidate) => candidate !== listener,
+            );
+          };
+        },
+      },
     });
   });
 
   const updateAdaptive = (update: Partial<AdaptiveStreamSnapshot>): void => {
     adaptiveSnapshot = Object.freeze({ ...adaptiveSnapshot, ...update });
     for (const listener of adaptiveListeners) listener(adaptiveSnapshot);
+  };
+  const updateQuality = (update: Partial<AdaptiveQualitySnapshot>): void => {
+    qualitySnapshot = Object.freeze({ ...qualitySnapshot, ...update });
+    for (const listener of qualityListeners) listener(qualitySnapshot);
   };
 
   afterEach(() => {
@@ -795,5 +839,78 @@ describe("DiagnosticDashboard", () => {
   it("resets adaptive state on dashboard destruction", () => {
     dashboard.destroy();
     expect(adaptiveReset).toHaveBeenCalledOnce();
+    expect(qualityReset).toHaveBeenCalledOnce();
+  });
+
+  it("renders separate accessible JPEG quality diagnostics and bounds", () => {
+    const quality = root.querySelector(".adaptive-quality-diagnostics");
+    expect(quality).not.toBe(
+      root.querySelector(".adaptive-stream-diagnostics"),
+    );
+    expect(quality).not.toBe(root.querySelector(".stream-diagnostics"));
+    expect(quality?.textContent).toContain("Mode: Adaptive");
+    expect(quality?.textContent).toContain("current JPEG quality: 80%");
+    expect(quality?.textContent).toContain("minimum quality: 45%");
+    expect(quality?.textContent).toContain("maximum quality: 90%");
+    expect(
+      root
+        .querySelector('[data-action="quality-mode"]')
+        ?.getAttribute("aria-label"),
+    ).toContain("JPEG quality");
+  });
+
+  it("renders quality pressure decisions and mode changes safely", () => {
+    updateQuality({
+      quality: 0.7,
+      overloadSamples: 1,
+      latestPayloadBytes: 150000,
+      latestBufferedBytes: 300000,
+      cooldownActive: true,
+      latestDecision: Object.freeze({
+        previousQuality: 0.8,
+        quality: 0.7,
+        direction: "decreased",
+        reason: "backpressure_drop",
+        healthySamples: 0,
+        overloadSamples: 1,
+        latestPayloadBytes: 150000,
+        latestBufferedBytes: 300000,
+        cooldownActive: true,
+        adjustedAt: 100,
+      }),
+    });
+    const diagnostics = root.querySelector(".adaptive-quality-diagnostics");
+    expect(diagnostics?.textContent).toContain("latest direction: decreased");
+    expect(diagnostics?.textContent).toContain("150000 bytes");
+    expect(diagnostics?.textContent).toContain("300000 bytes");
+    expect(diagnostics?.textContent).toContain("cooldown: active");
+    root
+      .querySelector<HTMLButtonElement>('[data-action="quality-mode"]')
+      ?.click();
+    expect(diagnostics?.textContent).toContain("Mode: Fixed");
+    expect(diagnostics?.textContent).toContain("current JPEG quality: 70%");
+  });
+
+  it("renders malicious quality decisions as plain text", () => {
+    const malicious = "<img src=x onerror=alert(1)>";
+    updateQuality({
+      latestDecision: Object.freeze({
+        previousQuality: 0.8,
+        quality: 0.8,
+        direction: malicious as never,
+        reason: malicious as never,
+        healthySamples: 0,
+        overloadSamples: 0,
+        latestPayloadBytes: 0,
+        latestBufferedBytes: 0,
+        cooldownActive: false,
+        adjustedAt: null,
+      }),
+    });
+    expect(
+      root.querySelector(".adaptive-quality-status")?.textContent,
+    ).toContain(malicious);
+    expect(root.querySelector(".adaptive-quality-status img")).toBeNull();
+    expect(root.querySelector("[onerror]")).toBeNull();
   });
 });

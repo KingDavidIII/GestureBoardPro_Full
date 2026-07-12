@@ -58,4 +58,72 @@ describe("CanvasFrameEncoder", () => {
       }).encode(source()),
     ).rejects.toBeInstanceOf(FrameEncodingError);
   });
+
+  it("updates quality for future encodes while reusing dimensions and canvas", async () => {
+    const qualities: number[] = [];
+    const element = canvas();
+    element.toBlob = ((
+      callback: BlobCallback,
+      type?: string,
+      quality?: number,
+    ) => {
+      qualities.push(quality ?? -1);
+      callback(new Blob(["jpeg"], { type: type ?? "image/jpeg" }));
+    }) as typeof element.toBlob;
+    const factory = vi.fn(() => element);
+    const encoder = new CanvasFrameEncoder({
+      jpegQuality: 0.8,
+      canvasFactory: factory,
+    });
+    encoder.setQuality(0.7);
+    const first = await encoder.encode(source());
+    encoder.setQuality(0.6);
+    const second = await encoder.encode(source());
+    expect(qualities).toEqual([0.7, 0.6]);
+    expect(first).toMatchObject({
+      mimeType: "image/jpeg",
+      width: 640,
+      height: 320,
+    });
+    expect(second.width).toBe(first.width);
+    expect(factory).toHaveBeenCalledOnce();
+  });
+
+  it("captures quality when an in-flight encode begins", async () => {
+    const callbacks: BlobCallback[] = [];
+    const qualities: number[] = [];
+    const element = canvas();
+    element.toBlob = ((
+      callback: BlobCallback,
+      _type?: string,
+      quality?: number,
+    ) => {
+      callbacks.push(callback);
+      qualities.push(quality ?? -1);
+    }) as typeof element.toBlob;
+    const encoder = new CanvasFrameEncoder({
+      jpegQuality: 0.8,
+      canvasFactory: () => element,
+    });
+    const pending = encoder.encode(source());
+    encoder.setQuality(0.5);
+    callbacks[0]?.(new Blob(["jpeg"], { type: "image/jpeg" }));
+    await pending;
+    expect(qualities).toEqual([0.8]);
+    expect(encoder.jpegQuality).toBe(0.5);
+  });
+
+  it("treats same-value updates as idempotent", () => {
+    const encoder = new CanvasFrameEncoder({ jpegQuality: 0.8 });
+    encoder.setQuality(0.8);
+    expect(encoder.jpegQuality).toBe(0.8);
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -0.1, 1.1])(
+    "rejects invalid runtime quality %s",
+    (quality) => {
+      const encoder = new CanvasFrameEncoder();
+      expect(() => encoder.setQuality(quality)).toThrow(FrameEncodingError);
+    },
+  );
 });

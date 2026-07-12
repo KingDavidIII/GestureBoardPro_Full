@@ -45,18 +45,20 @@ const DEFAULT_MAXIMUM_WIDTH = 640;
 const DEFAULT_MAXIMUM_HEIGHT = 480;
 
 export interface FrameEncoder {
+  readonly jpegQuality: number;
+  setQuality(quality: number): void;
   encode(source: VideoFrameSource): Promise<EncodedFrame>;
 }
 
 export class CanvasFrameEncoder implements FrameEncoder {
-  readonly jpegQuality: number;
+  private currentJpegQuality: number;
   readonly maximumWidth: number;
   readonly maximumHeight: number;
   private readonly canvasFactory: () => HTMLCanvasElement;
   private canvas: HTMLCanvasElement | null = null;
 
   constructor(config: FrameEncoderConfig = {}) {
-    this.jpegQuality = config.jpegQuality ?? DEFAULT_JPEG_QUALITY;
+    this.currentJpegQuality = config.jpegQuality ?? DEFAULT_JPEG_QUALITY;
     this.maximumWidth = this.positiveInteger(
       config.maximumWidth ?? DEFAULT_MAXIMUM_WIDTH,
       "maximumWidth",
@@ -66,10 +68,10 @@ export class CanvasFrameEncoder implements FrameEncoder {
       "maximumHeight",
     );
     if (
-      typeof this.jpegQuality !== "number" ||
-      !Number.isFinite(this.jpegQuality) ||
-      this.jpegQuality < 0 ||
-      this.jpegQuality > 1
+      typeof this.currentJpegQuality !== "number" ||
+      !Number.isFinite(this.currentJpegQuality) ||
+      this.currentJpegQuality <= 0 ||
+      this.currentJpegQuality > 1
     ) {
       throw new FrameEncodingError(
         FrameEncodingErrorCode.INVALID_CONFIGURATION,
@@ -78,6 +80,25 @@ export class CanvasFrameEncoder implements FrameEncoder {
     }
     this.canvasFactory =
       config.canvasFactory ?? (() => document.createElement("canvas"));
+  }
+
+  get jpegQuality(): number {
+    return this.currentJpegQuality;
+  }
+
+  setQuality(quality: number): void {
+    if (
+      typeof quality !== "number" ||
+      !Number.isFinite(quality) ||
+      quality <= 0 ||
+      quality > 1
+    )
+      throw new FrameEncodingError(
+        FrameEncodingErrorCode.INVALID_CONFIGURATION,
+        "jpegQuality must be greater than 0 and at most 1.",
+      );
+    if (quality === this.currentJpegQuality) return;
+    this.currentJpegQuality = quality;
   }
 
   async encode(source: VideoFrameSource): Promise<EncodedFrame> {
@@ -113,8 +134,9 @@ export class CanvasFrameEncoder implements FrameEncoder {
         cause,
       );
     }
+    const quality = this.currentJpegQuality;
     const blob = await new Promise<Blob | null>((resolve) =>
-      canvas.toBlob(resolve, "image/jpeg", this.jpegQuality),
+      canvas.toBlob(resolve, "image/jpeg", quality),
     );
     if (!blob || blob.size < 1)
       throw this.error(
