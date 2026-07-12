@@ -94,7 +94,18 @@ describe("FrameStreamController", () => {
     const camera = new Camera();
     const client = new Client();
     const scheduler = new Scheduler();
-    const encoder = { encode: vi.fn().mockResolvedValue(frame) };
+    let quality = 0.8;
+    const encoder = {
+      get jpegQuality() {
+        return quality;
+      },
+      setQuality: vi.fn((value: number) => {
+        if (!Number.isFinite(value) || value <= 0 || value > 1)
+          throw new RangeError("invalid quality");
+        quality = value;
+      }),
+      encode: vi.fn().mockResolvedValue(frame),
+    };
     const stream = new FrameStreamController(camera, encoder, client, {
       scheduler,
       now: () => 100,
@@ -109,6 +120,37 @@ describe("FrameStreamController", () => {
     expect(stream.targetFps).toBe(12);
     expect(stream.getMetrics().targetFps).toBe(12);
   });
+
+  it("updates JPEG quality without changing FPS, loops, or metrics", async () => {
+    const { stream, scheduler } = createStream();
+    stream.start();
+    scheduler.run(100);
+    await Promise.resolve();
+    await Promise.resolve();
+    const before = stream.getMetrics();
+    const requests = scheduler.requests;
+    stream.setJpegQuality(0.6);
+    expect(stream.jpegQuality).toBe(0.6);
+    expect(stream.targetFps).toBe(8);
+    expect(stream.getMetrics()).toMatchObject({
+      jpegQuality: 0.6,
+      framesSent: before.framesSent,
+      framesDroppedForBackpressure: before.framesDroppedForBackpressure,
+    });
+    expect(scheduler.requests).toBe(requests);
+    stream.setJpegQuality(0.6);
+    expect(scheduler.requests).toBe(requests);
+    stream.stop();
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -1, 1.1])(
+    "rejects invalid stream JPEG quality %s",
+    (quality) => {
+      const { stream } = createStream();
+      expect(() => stream.setJpegQuality(quality)).toThrow();
+      expect(stream.jpegQuality).toBe(0.8);
+    },
+  );
 
   it("uses an updated FPS for future scheduling in the same loop", async () => {
     const { stream, scheduler, encoder } = createStream(10);
@@ -214,7 +256,11 @@ describe("FrameStreamController", () => {
     const camera = new Camera();
     const client = new Client();
     const scheduler = new Scheduler();
-    const encoder = { encode: vi.fn().mockResolvedValue(frame) };
+    const encoder = {
+      jpegQuality: 0.8,
+      setQuality: vi.fn(),
+      encode: vi.fn().mockResolvedValue(frame),
+    };
     const stream = new FrameStreamController(camera, encoder, client, {
       scheduler,
       now: () => 100,
@@ -237,7 +283,11 @@ describe("FrameStreamController", () => {
     const camera = new Camera();
     const client = new Client();
     const scheduler = new Scheduler();
-    const encoder = { encode: vi.fn().mockResolvedValue(frame) };
+    const encoder = {
+      jpegQuality: 0.8,
+      setQuality: vi.fn(),
+      encode: vi.fn().mockResolvedValue(frame),
+    };
     client.buffered = 10;
     const stream = new FrameStreamController(camera, encoder, client, {
       scheduler,
@@ -259,7 +309,11 @@ describe("FrameStreamController", () => {
     const client = new Client();
     const stream = new FrameStreamController(
       new Camera(),
-      { encode: vi.fn().mockRejectedValue(new Error("bad frame")) },
+      {
+        jpegQuality: 0.8,
+        setQuality: vi.fn(),
+        encode: vi.fn().mockRejectedValue(new Error("bad frame")),
+      },
       client,
       { scheduler, now: () => 100 },
     );

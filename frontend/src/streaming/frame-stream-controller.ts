@@ -65,7 +65,7 @@ export class FrameStreamController {
   private scheduledFrame: number | null = null;
   private processing = false;
   private lastAttemptAt: number | null = null;
-  private metrics = this.emptyMetrics();
+  private metrics: FrameStreamMetrics;
 
   constructor(
     readonly camera: StreamCameraController,
@@ -77,6 +77,7 @@ export class FrameStreamController {
       config.targetFps ?? DEFAULT_TARGET_FPS,
       "targetFps",
     );
+    this.metrics = this.emptyMetrics();
     this.bufferedAmountThreshold = this.nonNegativeNumber(
       config.bufferedAmountThreshold ?? DEFAULT_BUFFERED_AMOUNT_THRESHOLD,
       "bufferedAmountThreshold",
@@ -166,6 +167,16 @@ export class FrameStreamController {
   get targetFps(): number {
     return this.currentTargetFps;
   }
+  get jpegQuality(): number {
+    return this.encoder.jpegQuality;
+  }
+  setJpegQuality(quality: number): void {
+    const previous = this.encoder.jpegQuality;
+    this.encoder.setQuality(quality);
+    if (this.encoder.jpegQuality === previous) return;
+    this.metrics = { ...this.metrics, jpegQuality: this.encoder.jpegQuality };
+    this.emitMetrics();
+  }
   setTargetFps(targetFps: number): void {
     const validated = this.positiveNumber(targetFps, "targetFps");
     if (validated === this.currentTargetFps) return;
@@ -213,6 +224,7 @@ export class FrameStreamController {
         framesDroppedForTiming: this.metrics.framesDroppedForTiming + 1,
       };
       this.emitDecision(FrameStreamDecision.TIMING_SKIPPED);
+      this.emitMetrics();
       this.schedule();
       return;
     }
@@ -236,6 +248,7 @@ export class FrameStreamController {
           this.metrics.framesDroppedForBackpressure + 1,
       };
       this.emitDecision(FrameStreamDecision.BACKPRESSURE_SKIPPED);
+      this.emitMetrics();
       this.schedule();
       return;
     }
@@ -312,6 +325,7 @@ export class FrameStreamController {
   private emptyMetrics(): FrameStreamMetrics {
     return {
       targetFps: this.currentTargetFps,
+      jpegQuality: this.encoder.jpegQuality,
       startedAt: null,
       stoppedAt: null,
       framesAttempted: 0,

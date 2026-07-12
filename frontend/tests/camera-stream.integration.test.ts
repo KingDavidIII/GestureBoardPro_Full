@@ -6,6 +6,8 @@ import {
   type PreviewVideoElement,
 } from "../src/camera";
 import {
+  AdaptiveQualityController,
+  AdaptiveQualityCoordinator,
   AdaptiveStreamController,
   AdaptiveStreamCoordinator,
   FrameStreamController,
@@ -74,7 +76,11 @@ it("streams an explicitly started fake camera once and releases it on shutdown",
   const scheduler = new Scheduler();
   const stream = new FrameStreamController(
     camera,
-    { encode: vi.fn().mockResolvedValue(encoded) },
+    {
+      jpegQuality: 0.8,
+      setQuality: vi.fn(),
+      encode: vi.fn().mockResolvedValue(encoded),
+    },
     client,
     { scheduler, now: () => 100 },
   );
@@ -107,7 +113,14 @@ it("coordinates validated scheduler feedback without restarting stream dependenc
   socket.open();
   await connection;
   const scheduler = new Scheduler();
+  let jpegQuality = 0.8;
   const encoder = {
+    get jpegQuality() {
+      return jpegQuality;
+    },
+    setQuality: vi.fn((quality: number) => {
+      jpegQuality = quality;
+    }),
     encode: vi.fn().mockResolvedValue({
       blob: new Blob(["jpeg"]),
       width: 640,
@@ -125,6 +138,21 @@ it("coordinates validated scheduler feedback without restarting stream dependenc
   let now = 0;
   const controller = new AdaptiveStreamController({ maximumFps: 8 }, () => now);
   const adaptive = new AdaptiveStreamCoordinator(controller, stream, client);
+  const qualityController = new AdaptiveQualityController(
+    {
+      initialQuality: 0.8,
+      minimumQuality: 0.45,
+      maximumQuality: 0.9,
+      healthySamplesBeforeIncrease: 2,
+      cooldownMs: 0,
+    },
+    () => now,
+  );
+  const adaptiveQuality = new AdaptiveQualityCoordinator(
+    qualityController,
+    stream,
+    client,
+  );
   stream.start();
   const loopsBeforeFeedback = scheduler.requests;
   const sendSample = (received: number, dropped: number, processingTime = 20) =>
@@ -159,6 +187,26 @@ it("coordinates validated scheduler feedback without restarting stream dependenc
   expect(cameraStart).not.toHaveBeenCalled();
   expect(scheduler.requests).toBe(loopsBeforeFeedback);
 
+  scheduler.run(100);
+  await Promise.resolve();
+  await Promise.resolve();
+  socket.bufferedAmount = 300000;
+  scheduler.run(300);
+  expect(stream.jpegQuality).toBeCloseTo(0.7);
+  expect(stream.getState()).toBe(FrameStreamState.STREAMING);
+  socket.bufferedAmount = 0;
+  scheduler.run(500);
+  await Promise.resolve();
+  await Promise.resolve();
+  scheduler.run(700);
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(stream.jpegQuality).toBeCloseTo(0.75);
+  adaptiveQuality.setMode("fixed");
+  socket.bufferedAmount = 300000;
+  scheduler.run(900);
+  expect(stream.jpegQuality).toBeCloseTo(0.75);
+
   now = 2000;
   for (let received = 3; received <= 10; received += 1) sendSample(received, 1);
   expect(stream.targetFps).toBe(7);
@@ -168,6 +216,7 @@ it("coordinates validated scheduler feedback without restarting stream dependenc
   expect(stream.targetFps).toBe(7);
   adaptive.setMode("adaptive");
   expect(controller.getState().hasBaseline).toBe(false);
+  expect(qualityController.getState().hasBaseline).toBe(false);
   sendSample(12, 2);
   expect(stream.targetFps).toBe(7);
 
@@ -179,4 +228,5 @@ it("coordinates validated scheduler feedback without restarting stream dependenc
   expect(stream.getState()).toBe(FrameStreamState.STOPPED);
   expect(controller.getState().hasBaseline).toBe(false);
   adaptive.destroy();
+  adaptiveQuality.destroy();
 });

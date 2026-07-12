@@ -4,6 +4,8 @@ import "./dashboard/dashboard.css";
 import { DiagnosticDashboard } from "./dashboard";
 import { GestureWebSocketClient } from "./websocket";
 import {
+  AdaptiveQualityController,
+  AdaptiveQualityCoordinator,
   AdaptiveStreamController,
   AdaptiveStreamCoordinator,
   FrameStreamController,
@@ -21,10 +23,16 @@ const adaptive = new AdaptiveStreamCoordinator(
   stream,
   client,
 );
+const adaptiveQuality = new AdaptiveQualityCoordinator(
+  new AdaptiveQualityController({ initialQuality: stream.jpegQuality }),
+  stream,
+  client,
+);
 const dashboard = new DiagnosticDashboard(root, client, {
   camera,
   stream,
   adaptive,
+  adaptiveQuality,
   jpegQuality: encoder.jpegQuality,
   maximumFrameWidth: encoder.maximumWidth,
 });
@@ -32,6 +40,7 @@ const dashboard = new DiagnosticDashboard(root, client, {
 const shutdown = (): void => {
   dashboard.destroy();
   adaptive.destroy();
+  adaptiveQuality.destroy();
   stream.stop();
   camera.stop();
   client.destroy();

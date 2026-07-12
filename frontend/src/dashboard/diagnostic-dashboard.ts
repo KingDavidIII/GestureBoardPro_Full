@@ -6,6 +6,8 @@ import {
 import type { AnnotatedFrameMessage, ServerMessage } from "../protocol";
 import type { SchedulerMetadata } from "../protocol/messages";
 import {
+  type AdaptiveQualityMode,
+  type AdaptiveQualitySnapshot,
   type AdaptiveMode,
   type AdaptiveStreamSnapshot,
   FrameStreamState,
@@ -36,6 +38,14 @@ export interface DiagnosticDashboardOptions {
     reset(): void;
     subscribe(listener: (snapshot: AdaptiveStreamSnapshot) => void): () => void;
   };
+  readonly adaptiveQuality?: {
+    getSnapshot(): AdaptiveQualitySnapshot;
+    setMode(mode: AdaptiveQualityMode): void;
+    reset(): void;
+    subscribe(
+      listener: (snapshot: AdaptiveQualitySnapshot) => void,
+    ): () => void;
+  };
 }
 
 export class DiagnosticDashboard {
@@ -47,6 +57,9 @@ export class DiagnosticDashboard {
   private readonly adaptiveDiagnostics: HTMLDivElement;
   private readonly adaptiveStatus: HTMLOutputElement;
   private readonly adaptiveModeButton: HTMLButtonElement;
+  private readonly qualityDiagnostics: HTMLDivElement;
+  private readonly qualityStatus: HTMLOutputElement;
+  private readonly qualityModeButton: HTMLButtonElement;
   private readonly connectButton: HTMLButtonElement;
   private readonly disconnectButton: HTMLButtonElement;
   private readonly pingButton: HTMLButtonElement;
@@ -64,6 +77,7 @@ export class DiagnosticDashboard {
   private readonly unsubscribeCamera: (() => void) | null;
   private readonly unsubscribeStream: (() => void) | null;
   private readonly unsubscribeAdaptive: (() => void) | null;
+  private readonly unsubscribeQuality: (() => void) | null;
   private cameraState: CameraState | null;
   private streamState: FrameStreamState | null;
   private supportsAnnotations = false;
@@ -73,6 +87,7 @@ export class DiagnosticDashboard {
   private reconnectPending = false;
   private schedulerMetrics: SchedulerMetadata | null = null;
   private adaptiveSnapshot: AdaptiveStreamSnapshot | null;
+  private qualitySnapshot: AdaptiveQualitySnapshot | null;
 
   constructor(
     private readonly root: HTMLElement,
@@ -83,6 +98,7 @@ export class DiagnosticDashboard {
     this.objectUrls = this.options.objectUrls ?? URL;
     this.streamState = this.options.stream?.getState() ?? null;
     this.adaptiveSnapshot = this.options.adaptive?.getSnapshot() ?? null;
+    this.qualitySnapshot = this.options.adaptiveQuality?.getSnapshot() ?? null;
     this.root.innerHTML = `<main class="diagnostic-dashboard" aria-labelledby="dashboard-title">
       <header><p class="eyebrow">GestureBoard Pro</p><h1 id="dashboard-title">Protocol diagnostics</h1><output class="connection-status" aria-live="polite" aria-atomic="true"></output></header>
       <section aria-labelledby="connection-controls-title"><h2 id="connection-controls-title">Connection</h2><p class="connection-url"></p><div class="controls"><button type="button" data-action="connect">Connect</button><button type="button" data-action="disconnect">Disconnect</button><button type="button" data-action="ping">Send ping</button><button type="button" data-action="reset">Reset runtime</button></div></section>
@@ -90,6 +106,7 @@ export class DiagnosticDashboard {
       <section aria-labelledby="stream-diagnostics-title"><h2 id="stream-diagnostics-title">Streaming diagnostics</h2><output class="stream-status" aria-live="polite" aria-atomic="true"></output><div class="stream-diagnostics"></div></section>
       <section aria-labelledby="server-scheduling-title"><h2 id="server-scheduling-title">Server-side frame scheduling</h2><div class="server-scheduler-diagnostics"></div></section>
       <section aria-labelledby="adaptive-stream-title"><h2 id="adaptive-stream-title">Adaptive stream control</h2><button type="button" data-action="adaptive-mode" aria-label="Switch adaptive stream mode"></button><output class="adaptive-stream-status" aria-live="polite" aria-atomic="true"></output><div class="adaptive-stream-diagnostics"></div></section>
+      <section aria-labelledby="adaptive-quality-title"><h2 id="adaptive-quality-title">Adaptive JPEG quality</h2><button type="button" data-action="quality-mode" aria-label="Switch adaptive JPEG quality mode"></button><output class="adaptive-quality-status" aria-live="polite" aria-atomic="true"></output><div class="adaptive-quality-diagnostics"></div></section>
       <section aria-labelledby="annotation-title"><h2 id="annotation-title">Annotated feedback</h2><button type="button" data-action="annotation" aria-label="Enable annotated frame feedback">Enable annotated feedback</button><output class="annotation-status" aria-live="polite"></output><img class="annotated-preview" alt="Latest annotated gesture frame" /><p class="annotation-diagnostics"></p></section>
       <section aria-labelledby="message-log-title"><h2 id="message-log-title">Message log</h2><ol class="message-log" aria-live="polite" aria-relevant="additions"></ol></section>
     </main>`;
@@ -101,6 +118,9 @@ export class DiagnosticDashboard {
     this.adaptiveDiagnostics = this.element(".adaptive-stream-diagnostics");
     this.adaptiveStatus = this.element(".adaptive-stream-status");
     this.adaptiveModeButton = this.element('[data-action="adaptive-mode"]');
+    this.qualityDiagnostics = this.element(".adaptive-quality-diagnostics");
+    this.qualityStatus = this.element(".adaptive-quality-status");
+    this.qualityModeButton = this.element('[data-action="quality-mode"]');
     this.connectButton = this.element('[data-action="connect"]');
     this.disconnectButton = this.element('[data-action="disconnect"]');
     this.pingButton = this.element('[data-action="ping"]');
@@ -139,6 +159,9 @@ export class DiagnosticDashboard {
     this.adaptiveModeButton.addEventListener("click", () =>
       this.toggleAdaptiveMode(),
     );
+    this.qualityModeButton.addEventListener("click", () =>
+      this.toggleQualityMode(),
+    );
     this.unsubscribe = this.client.subscribe((event) =>
       this.handleEvent(event),
     );
@@ -155,12 +178,18 @@ export class DiagnosticDashboard {
         this.adaptiveSnapshot = snapshot;
         this.renderAdaptive();
       }) ?? null;
+    this.unsubscribeQuality =
+      this.options.adaptiveQuality?.subscribe((snapshot) => {
+        this.qualitySnapshot = snapshot;
+        this.renderQuality();
+      }) ?? null;
     if (this.options.camera) void this.options.camera.attachPreview(this.video);
     this.renderState(this.client.getState());
     this.renderCamera();
     this.renderStream();
     this.renderServerScheduler();
     this.renderAdaptive();
+    this.renderQuality();
     this.renderAnnotation();
   }
 
@@ -171,7 +200,9 @@ export class DiagnosticDashboard {
     this.unsubscribeCamera?.();
     this.unsubscribeStream?.();
     this.unsubscribeAdaptive?.();
+    this.unsubscribeQuality?.();
     this.options.adaptive?.reset();
+    this.options.adaptiveQuality?.reset();
     this.options.camera?.detachPreview();
     this.clearAnnotation();
     this.root.replaceChildren();
@@ -379,6 +410,37 @@ export class DiagnosticDashboard {
       ? `Latest adjustment: ${decision.direction}; ${decision.reason}.`
       : "Latest adjustment: none in this adaptive epoch.";
     this.adaptiveDiagnostics.textContent = `Mode: ${mode}; current target FPS: ${snapshot.targetFps}; minimum FPS: ${snapshot.minimumFps}; maximum FPS: ${snapshot.maximumFps}; latest direction: ${decision?.direction ?? "none"}; latest reason: ${decision?.reason ?? "none"}; healthy samples: ${snapshot.healthySamples}; overload samples: ${snapshot.overloadSamples}; estimated sustainable server FPS: ${capacity ?? "unavailable"}; cooldown: ${snapshot.cooldownActive ? "active" : "inactive"}.`;
+  }
+  private toggleQualityMode(): void {
+    const snapshot = this.qualitySnapshot;
+    if (!snapshot) return;
+    this.options.adaptiveQuality?.setMode(
+      snapshot.mode === "adaptive" ? "fixed" : "adaptive",
+    );
+  }
+  private renderQuality(): void {
+    const snapshot = this.qualitySnapshot;
+    this.qualityModeButton.disabled = !snapshot;
+    if (!snapshot) {
+      this.qualityModeButton.textContent = "Quality control unavailable";
+      this.qualityStatus.textContent =
+        "No adaptive quality decision available.";
+      this.qualityDiagnostics.textContent =
+        "Adaptive quality diagnostics are unavailable.";
+      return;
+    }
+    const mode = snapshot.mode === "adaptive" ? "Adaptive" : "Fixed";
+    this.qualityModeButton.textContent =
+      snapshot.mode === "adaptive"
+        ? "Use Fixed quality"
+        : "Use Adaptive quality";
+    const decision = snapshot.latestDecision;
+    this.qualityStatus.textContent = decision
+      ? `Latest quality adjustment: ${decision.direction}; ${decision.reason}.`
+      : "Latest quality adjustment: none in this transport epoch.";
+    const percent = (value: number) =>
+      Number.isFinite(value) ? `${(value * 100).toFixed(0)}%` : "unavailable";
+    this.qualityDiagnostics.textContent = `Mode: ${mode}; current JPEG quality: ${percent(snapshot.quality)}; minimum quality: ${percent(snapshot.minimumQuality)}; maximum quality: ${percent(snapshot.maximumQuality)}; latest direction: ${decision?.direction ?? "none"}; latest reason: ${decision?.reason ?? "none"}; healthy samples: ${snapshot.healthySamples}; overload samples: ${snapshot.overloadSamples}; latest encoded payload: ${snapshot.latestPayloadBytes} bytes; latest WebSocket buffered: ${snapshot.latestBufferedBytes} bytes; cooldown: ${snapshot.cooldownActive ? "active" : "inactive"}.`;
   }
   private append(title: string, detail: string): void {
     const entry = document.createElement("li");
