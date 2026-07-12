@@ -125,6 +125,32 @@ uses a JPEG Blob/object URL and revokes URLs on replacement, disable,
 disconnect, and destruction. Annotation increases CPU and bandwidth usage; the
 backend continues to process frames sequentially.
 
+## Adaptive frame rate
+
+Frame streaming defaults to **Adaptive** mode. Validated `gesture.result`
+scheduler metadata feeds an additive-increase/multiplicative-decrease controller
+only while the WebSocket is open and streaming is active. **Fixed** mode keeps
+the current target FPS and disables automatic changes without stopping the
+stream. Switching back to Adaptive starts a fresh sampling epoch and never
+starts the camera, stream, or connection automatically.
+
+The default policy uses a minimum of 5 FPS and the configured initial stream
+rate as its maximum. It decreases by a factor of 0.75 on overload, increases by
+1 FPS after 8 healthy samples, and enforces a 1500 ms cooldown. Overload means a
+positive delta in the cumulative server dropped-frame counter, pending depth of
+1, queue delay of at least 80 ms, or estimated processing capacity below the
+0.9 utilisation threshold. A zero processing duration does not produce an
+infinite estimate.
+
+Adaptive history resets when streaming stops, the socket leaves `OPEN`,
+reconnection begins, Adaptive mode is disabled, counters regress, or the
+application is destroyed. Reconnection never resumes streaming; the user must
+restart it explicitly, and fresh scheduler samples establish a new baseline.
+
+The dashboard keeps three distinct diagnostic groups: browser capture/send
+metrics, server scheduler metrics, and adaptive-controller decisions. Alpha 6
+changes target FPS only; JPEG quality is not adapted.
+
 ## Testing
 
 Vitest runs in JSDOM. Camera, media stream, canvas, scheduler, clock, encoder,

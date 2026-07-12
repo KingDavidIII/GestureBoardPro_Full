@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CameraState, type CameraController } from "../src/camera";
 import { DiagnosticDashboard, type ObjectUrlApi } from "../src/dashboard";
-import { FrameStreamState, type FrameStreamController } from "../src/streaming";
+import {
+  FrameStreamState,
+  type AdaptiveStreamSnapshot,
+  type FrameStreamController,
+} from "../src/streaming";
 import {
   GestureWebSocketClient,
   type GestureWebSocketClientEvent,
@@ -60,6 +64,9 @@ describe("DiagnosticDashboard", () => {
   let streamState: FrameStreamState;
   let reconnectTimers: DashboardReconnectTimers;
   let sockets: FakeWebSocket[];
+  let adaptiveSnapshot: AdaptiveStreamSnapshot;
+  let adaptiveListeners: Array<(snapshot: AdaptiveStreamSnapshot) => void>;
+  let adaptiveReset: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     root = document.createElement("div");
@@ -95,6 +102,19 @@ describe("DiagnosticDashboard", () => {
       streamState = FrameStreamState.STOPPED;
     });
     streamState = FrameStreamState.IDLE;
+    adaptiveSnapshot = Object.freeze({
+      mode: "adaptive",
+      targetFps: 8,
+      minimumFps: 5,
+      maximumFps: 8,
+      latestDecision: null,
+      healthySamples: 0,
+      overloadSamples: 0,
+      estimatedCapacityFps: null,
+      cooldownActive: false,
+    });
+    adaptiveListeners = [];
+    adaptiveReset = vi.fn();
     const camera = {
       getState: () => CameraState.IDLE,
       getMetadata: () => null,
@@ -140,8 +160,35 @@ describe("DiagnosticDashboard", () => {
         createObjectURL,
         revokeObjectURL,
       } satisfies ObjectUrlApi,
+      adaptive: {
+        getSnapshot: () => adaptiveSnapshot,
+        setMode: vi.fn((mode) => {
+          adaptiveSnapshot = Object.freeze({
+            ...adaptiveSnapshot,
+            mode,
+            latestDecision: null,
+            healthySamples: 0,
+            overloadSamples: 0,
+          });
+          for (const listener of adaptiveListeners) listener(adaptiveSnapshot);
+        }),
+        reset: adaptiveReset,
+        subscribe: (listener) => {
+          adaptiveListeners.push(listener);
+          return () => {
+            adaptiveListeners = adaptiveListeners.filter(
+              (candidate) => candidate !== listener,
+            );
+          };
+        },
+      },
     });
   });
+
+  const updateAdaptive = (update: Partial<AdaptiveStreamSnapshot>): void => {
+    adaptiveSnapshot = Object.freeze({ ...adaptiveSnapshot, ...update });
+    for (const listener of adaptiveListeners) listener(adaptiveSnapshot);
+  };
 
   afterEach(() => {
     dashboard.destroy();
@@ -643,5 +690,110 @@ describe("DiagnosticDashboard", () => {
     sockets[1]?.open();
     await Promise.resolve();
     expect(server?.textContent).toContain("No server scheduler metrics");
+  });
+
+  it("renders a separate accessible adaptive section with default policy", () => {
+    const adaptive = root.querySelector(".adaptive-stream-diagnostics");
+    const browser = root.querySelector(".stream-diagnostics");
+    const server = root.querySelector(".server-scheduler-diagnostics");
+    const control = root.querySelector<HTMLButtonElement>(
+      '[data-action="adaptive-mode"]',
+    );
+    expect(adaptive).not.toBe(browser);
+    expect(adaptive).not.toBe(server);
+    expect(adaptive?.textContent).toContain("Mode: Adaptive");
+    expect(adaptive?.textContent).toContain("current target FPS: 8");
+    expect(adaptive?.textContent).toContain("minimum FPS: 5");
+    expect(adaptive?.textContent).toContain("maximum FPS: 8");
+    expect(control?.getAttribute("aria-label")).toContain("adaptive");
+  });
+
+  it("renders overload, healthy, cooldown and capacity diagnostics safely", () => {
+    updateAdaptive({
+      targetFps: 6,
+      healthySamples: 0,
+      overloadSamples: 1,
+      estimatedCapacityFps: 12.345,
+      cooldownActive: true,
+      latestDecision: Object.freeze({
+        previousTargetFps: 8,
+        targetFps: 6,
+        direction: "decreased",
+        reason: "server_drop",
+        healthySamples: 0,
+        overloadSamples: 1,
+        estimatedCapacityFps: 12.345,
+        adjustedAt: 100,
+      }),
+    });
+    const diagnostics = root.querySelector(".adaptive-stream-diagnostics");
+    expect(diagnostics?.textContent).toContain("latest direction: decreased");
+    expect(diagnostics?.textContent).toContain("server_drop");
+    expect(diagnostics?.textContent).toContain("12.3");
+    expect(diagnostics?.textContent).toContain("cooldown: active");
+    const previousDecision = adaptiveSnapshot.latestDecision;
+    if (!previousDecision) throw new Error("Expected an adaptive decision.");
+    updateAdaptive({
+      latestDecision: Object.freeze({
+        ...previousDecision,
+        direction: "increased",
+        reason: "healthy_window",
+      }),
+    });
+    expect(diagnostics?.textContent).toContain("latest direction: increased");
+  });
+
+  it("switches fixed and adaptive modes without changing stream state", () => {
+    streamState = FrameStreamState.STREAMING;
+    const control = root.querySelector<HTMLButtonElement>(
+      '[data-action="adaptive-mode"]',
+    );
+    control?.click();
+    expect(
+      root.querySelector(".adaptive-stream-diagnostics")?.textContent,
+    ).toContain("Mode: Fixed");
+    expect(streamState).toBe(FrameStreamState.STREAMING);
+    updateAdaptive({ healthySamples: 4, overloadSamples: 2 });
+    control?.click();
+    expect(
+      root.querySelector(".adaptive-stream-diagnostics")?.textContent,
+    ).toContain("healthy samples: 0");
+  });
+
+  it("uses placeholders and never displays Infinity for missing capacity", () => {
+    updateAdaptive({ estimatedCapacityFps: null, cooldownActive: false });
+    const text = root.querySelector(
+      ".adaptive-stream-diagnostics",
+    )?.textContent;
+    expect(text).toContain("estimated sustainable server FPS: unavailable");
+    expect(text).toContain("cooldown: inactive");
+    expect(text).not.toContain("Infinity");
+    expect(text).not.toContain("NaN");
+  });
+
+  it("renders untrusted decision text only as plain text", () => {
+    const malicious = '<img src=x onerror="alert(1)">';
+    updateAdaptive({
+      latestDecision: Object.freeze({
+        previousTargetFps: 8,
+        targetFps: 8,
+        direction: malicious as never,
+        reason: malicious as never,
+        healthySamples: 0,
+        overloadSamples: 0,
+        estimatedCapacityFps: null,
+        adjustedAt: null,
+      }),
+    });
+    expect(
+      root.querySelector(".adaptive-stream-status")?.textContent,
+    ).toContain(malicious);
+    expect(root.querySelector(".adaptive-stream-status img")).toBeNull();
+    expect(root.querySelector("[onerror]")).toBeNull();
+  });
+
+  it("resets adaptive state on dashboard destruction", () => {
+    dashboard.destroy();
+    expect(adaptiveReset).toHaveBeenCalledOnce();
   });
 });

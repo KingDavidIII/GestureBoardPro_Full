@@ -36,6 +36,7 @@ export class FrameStreamError extends Error {
 }
 
 export interface FrameStreamMetrics {
+  readonly targetFps: number;
   readonly startedAt: number | null;
   readonly stoppedAt: number | null;
   readonly framesAttempted: number;
