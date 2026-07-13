@@ -46,12 +46,18 @@ const DEFAULT_MAXIMUM_HEIGHT = 480;
 
 export interface FrameEncoder {
   readonly jpegQuality: number;
+  readonly outputWidth?: number;
+  readonly outputHeight?: number;
   setQuality(quality: number): void;
+  setOutputDimensions?(width: number, height: number): void;
   encode(source: VideoFrameSource): Promise<EncodedFrame>;
 }
 
 export class CanvasFrameEncoder implements FrameEncoder {
   private currentJpegQuality: number;
+  private currentOutputWidth: number;
+  private currentOutputHeight: number;
+  private hasExplicitOutputDimensions = false;
   readonly maximumWidth: number;
   readonly maximumHeight: number;
   private readonly canvasFactory: () => HTMLCanvasElement;
@@ -67,6 +73,8 @@ export class CanvasFrameEncoder implements FrameEncoder {
       config.maximumHeight ?? DEFAULT_MAXIMUM_HEIGHT,
       "maximumHeight",
     );
+    this.currentOutputWidth = this.maximumWidth;
+    this.currentOutputHeight = this.maximumHeight;
     if (
       typeof this.currentJpegQuality !== "number" ||
       !Number.isFinite(this.currentJpegQuality) ||
@@ -85,6 +93,12 @@ export class CanvasFrameEncoder implements FrameEncoder {
   get jpegQuality(): number {
     return this.currentJpegQuality;
   }
+  get outputWidth(): number {
+    return this.currentOutputWidth;
+  }
+  get outputHeight(): number {
+    return this.currentOutputHeight;
+  }
 
   setQuality(quality: number): void {
     if (
@@ -100,6 +114,26 @@ export class CanvasFrameEncoder implements FrameEncoder {
     if (quality === this.currentJpegQuality) return;
     this.currentJpegQuality = quality;
   }
+  setOutputDimensions(width: number, height: number): void {
+    const validatedWidth = this.positiveInteger(width, "width");
+    const validatedHeight = this.positiveInteger(height, "height");
+    if (
+      validatedWidth > this.maximumWidth ||
+      validatedHeight > this.maximumHeight
+    )
+      throw new FrameEncodingError(
+        FrameEncodingErrorCode.INVALID_CONFIGURATION,
+        "Output dimensions exceed encoder limits.",
+      );
+    if (
+      validatedWidth === this.currentOutputWidth &&
+      validatedHeight === this.currentOutputHeight
+    )
+      return;
+    this.currentOutputWidth = validatedWidth;
+    this.currentOutputHeight = validatedHeight;
+    this.hasExplicitOutputDimensions = true;
+  }
 
   async encode(source: VideoFrameSource): Promise<EncodedFrame> {
     if (source.readyState < HAVE_CURRENT_DATA)
@@ -112,10 +146,9 @@ export class CanvasFrameEncoder implements FrameEncoder {
         FrameEncodingErrorCode.INVALID_SOURCE_DIMENSIONS,
         "Video dimensions must be positive.",
       );
-    const { width, height } = this.resize(
-      source.videoWidth,
-      source.videoHeight,
-    );
+    const { width, height } = this.hasExplicitOutputDimensions
+      ? { width: this.currentOutputWidth, height: this.currentOutputHeight }
+      : this.resize(source.videoWidth, source.videoHeight);
     const canvas = this.canvas ?? (this.canvas = this.canvasFactory());
     canvas.width = width;
     canvas.height = height;
@@ -153,6 +186,15 @@ export class CanvasFrameEncoder implements FrameEncoder {
     });
   }
 
+  private positiveInteger(value: number, name: string): number {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1)
+      throw new FrameEncodingError(
+        FrameEncodingErrorCode.INVALID_CONFIGURATION,
+        `${name} must be a positive integer.`,
+      );
+    return value;
+  }
+
   private resize(
     width: number,
     height: number,
@@ -166,15 +208,6 @@ export class CanvasFrameEncoder implements FrameEncoder {
       width: Math.max(1, Math.round(width * scale)),
       height: Math.max(1, Math.round(height * scale)),
     };
-  }
-
-  private positiveInteger(value: number, name: string): number {
-    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1)
-      throw new FrameEncodingError(
-        FrameEncodingErrorCode.INVALID_CONFIGURATION,
-        `${name} must be a positive integer.`,
-      );
-    return value;
   }
 
   private error(

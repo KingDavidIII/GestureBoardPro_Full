@@ -8,10 +8,15 @@ import {
 import {
   AdaptiveQualityController,
   AdaptiveQualityCoordinator,
+  AdaptiveResolutionController,
+  AdaptiveResolutionCoordinator,
   AdaptiveStreamController,
   AdaptiveStreamCoordinator,
+  BandwidthEstimator,
   FrameStreamController,
   FrameStreamState,
+  type ResolutionAdaptiveStream,
+  type ResolutionSocketSource,
   type FrameScheduler,
 } from "../src/streaming";
 import { GestureWebSocketClient } from "../src/websocket";
@@ -229,4 +234,319 @@ it("coordinates validated scheduler feedback without restarting stream dependenc
   expect(controller.getState().hasBaseline).toBe(false);
   adaptive.destroy();
   adaptiveQuality.destroy();
+});
+
+it("feeds deterministic transport metrics through bandwidth estimation into one-step resolution control", () => {
+  let now = 0;
+  let width = 640;
+  let height = 480;
+  const listeners: Array<(event: never) => void> = [];
+  const stream = {
+    jpegQuality: 0.45,
+    targetFps: 8,
+    get outputWidth() {
+      return width;
+    },
+    get outputHeight() {
+      return height;
+    },
+    getState: () => FrameStreamState.STREAMING,
+    getMetrics: () => ({
+      targetFps: 8,
+      jpegQuality: 0.45,
+      outputWidth: width,
+      outputHeight: height,
+      startedAt: 0,
+      stoppedAt: null,
+      framesAttempted: 0,
+      framesEncoded: 0,
+      framesSent: 0,
+      framesDroppedForBackpressure: 0,
+      framesDroppedForTiming: 0,
+      encodingFailures: 0,
+      sendFailures: 0,
+      lastFrameSize: 100,
+      lastFrameWidth: width,
+      lastFrameHeight: height,
+      effectiveFps: 0,
+    }),
+    setOutputResolution: vi.fn((nextWidth: number, nextHeight: number) => {
+      width = nextWidth;
+      height = nextHeight;
+    }),
+    subscribe: (listener: (event: never) => void) => {
+      listeners.push(listener);
+      return () => undefined;
+    },
+  } as unknown as ResolutionAdaptiveStream;
+  const socket = {
+    getState: () => "OPEN",
+    getBufferedAmount: () => 0,
+    subscribe: () => () => undefined,
+  } as unknown as ResolutionSocketSource;
+  const coordinator = new AdaptiveResolutionCoordinator(
+    new AdaptiveResolutionController(undefined, {
+      overloadSamplesBeforeDecrease: 1,
+      cooldownMs: 0,
+    }),
+    new BandwidthEstimator({ minimumWindowMs: 1 }),
+    stream,
+    socket,
+    0.45,
+    () => now,
+  );
+  const emit = (framesSent: number, drops: number) =>
+    listeners.forEach((listener) =>
+      listener({
+        type: "metrics.changed",
+        metrics: {
+          ...stream.getMetrics(),
+          framesSent,
+          framesDroppedForBackpressure: drops,
+        },
+      } as never),
+    );
+  emit(0, 0);
+  now = 1000;
+  emit(1, 1);
+  expect(stream.setOutputResolution).toHaveBeenCalledWith(480, 360);
+  expect(coordinator.getSnapshot()).toMatchObject({
+    currentProfile: { id: "medium" },
+    estimate: { pressure: "overloaded" },
+  });
+  coordinator.setMode("fixed");
+  now = 2000;
+  emit(2, 2);
+  expect(stream.setOutputResolution).toHaveBeenCalledTimes(1);
+  coordinator.destroy();
+});
+
+it("moves high to low and restores low to high one profile at a time across fresh epochs", () => {
+  let now = 0;
+  const controller = new AdaptiveResolutionController(
+    undefined,
+    {
+      overloadSamplesBeforeDecrease: 2,
+      healthySamplesBeforeIncrease: 2,
+      cooldownMs: 10,
+    },
+    () => now,
+  );
+  const overloaded = (profile: string) => ({
+    currentProfile: profile,
+    jpegQuality: 0.45,
+    minimumJpegQuality: 0.45,
+    targetFps: 8,
+    streaming: true,
+    socketOpen: true,
+    estimate: {
+      instantaneousBitrateBps: 1000000,
+      smoothedBitrateBps: 1000000,
+      estimatedBytesPerSecond: 125000,
+      averageFrameBytes: 100,
+      sampleCount: 12,
+      elapsedWindowMs: 1000,
+      confidence: "high" as const,
+      pressure: "overloaded" as const,
+      latestBufferedBytes: 0,
+      latestPayloadBytes: 100,
+      sendFailureDelta: 0,
+      backpressureDropDelta: 0,
+    },
+  });
+  const healthy = (profile: string) => ({
+    ...overloaded(profile),
+    estimate: { ...overloaded(profile).estimate, pressure: "healthy" as const },
+  });
+  expect(controller.evaluate(overloaded("high")).profile).toBe("high");
+  expect(controller.evaluate(overloaded("high"))).toMatchObject({
+    profile: "medium",
+    direction: "decreased",
+  });
+  now = 11;
+  controller.evaluate(overloaded("medium"));
+  expect(controller.evaluate(overloaded("medium"))).toMatchObject({
+    profile: "low",
+    direction: "decreased",
+  });
+  now = 22;
+  controller.evaluate(overloaded("low"));
+  expect(controller.evaluate(overloaded("low"))).toMatchObject({
+    profile: "low",
+    direction: "unchanged",
+  });
+  now = 33;
+  expect(controller.evaluate(healthy("low")).direction).toBe("unchanged");
+  expect(controller.evaluate(healthy("low"))).toMatchObject({
+    profile: "medium",
+    direction: "increased",
+  });
+  now = 44;
+  controller.evaluate(healthy("medium"));
+  expect(controller.evaluate(healthy("medium"))).toMatchObject({
+    profile: "high",
+    direction: "increased",
+  });
+  now = 55;
+  controller.evaluate(healthy("high"));
+  expect(controller.evaluate(healthy("high"))).toMatchObject({
+    profile: "high",
+    direction: "unchanged",
+  });
+  expect(controller.getState().mode).toBe("adaptive");
+});
+
+it("resets adaptation on reconnect and requires a new baseline after manual stream restart", () => {
+  const controller = new AdaptiveResolutionController();
+  const estimate = {
+    instantaneousBitrateBps: null,
+    smoothedBitrateBps: null,
+    estimatedBytesPerSecond: null,
+    averageFrameBytes: null,
+    sampleCount: 0,
+    elapsedWindowMs: 0,
+    confidence: "unavailable" as const,
+    pressure: "unknown" as const,
+    latestBufferedBytes: 0,
+    latestPayloadBytes: 0,
+    sendFailureDelta: 0,
+    backpressureDropDelta: 0,
+  };
+  const sample = {
+    currentProfile: "medium",
+    jpegQuality: 0.45,
+    minimumJpegQuality: 0.45,
+    targetFps: 8,
+    streaming: true,
+    socketOpen: true,
+    estimate,
+  };
+  controller.evaluate(sample);
+  controller.reset();
+  expect(controller.getState()).toMatchObject({
+    hasBaseline: false,
+    healthySamples: 0,
+    overloadSamples: 0,
+  });
+  expect(controller.evaluate(sample)).toMatchObject({
+    profile: "medium",
+    direction: "reset",
+    reason: "insufficient_data",
+  });
+});
+
+it("drives capture-loop transport drops through quality then resolution composition", async () => {
+  const camera = {
+    getState: () => "READY",
+    getPreview: () => ({ videoWidth: 640, videoHeight: 480, readyState: 4 }),
+    subscribe: () => () => undefined,
+  } as never;
+  const socket = new FakeWebSocket();
+  const client = new GestureWebSocketClient("ws://board.test/ws/", {
+    socketFactory: () => socket,
+    reconnectPolicy: { enabled: false },
+  });
+  const connection = client.connect();
+  socket.open();
+  await connection;
+  const scheduler = new Scheduler();
+  let quality = 0.45;
+  let width = 640;
+  let height = 480;
+  let now = 0;
+  const encoder = {
+    get jpegQuality() {
+      return quality;
+    },
+    get outputWidth() {
+      return width;
+    },
+    get outputHeight() {
+      return height;
+    },
+    setQuality: vi.fn((value: number) => {
+      quality = value;
+    }),
+    setOutputDimensions: vi.fn((nextWidth: number, nextHeight: number) => {
+      width = nextWidth;
+      height = nextHeight;
+    }),
+    encode: vi.fn().mockImplementation(async () => ({
+      blob: new Blob([new Uint8Array(1000000)]),
+      width: 640,
+      height: 480,
+      size: 1000000,
+      mimeType: "image/jpeg",
+      capturedAt: 0,
+    })),
+  };
+  const stream = new FrameStreamController(camera, encoder, client, {
+    scheduler,
+    now: () => now,
+  });
+  const qualityCoordinator = new AdaptiveQualityCoordinator(
+    new AdaptiveQualityController({
+      initialQuality: 0.45,
+      minimumQuality: 0.45,
+      overloadSamplesBeforeDecrease: 1,
+      healthySamplesBeforeIncrease: 2,
+      cooldownMs: 0,
+    }),
+    stream,
+    client,
+  );
+  const resolution = new AdaptiveResolutionCoordinator(
+    new AdaptiveResolutionController(undefined, {
+      overloadSamplesBeforeDecrease: 2,
+      healthySamplesBeforeIncrease: 2,
+      requiredBandwidthHeadroom: 1.01,
+      cooldownMs: 0,
+    }),
+    new BandwidthEstimator({ minimumWindowMs: 1 }),
+    stream,
+    client,
+    0.45,
+    () => now,
+  );
+  const tick = async (timestamp: number, bufferedAmount: number) => {
+    now = timestamp;
+    socket.bufferedAmount = bufferedAmount;
+    scheduler.run(timestamp);
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+  stream.start();
+  await tick(0, 0);
+  await tick(1000, 300000);
+  expect(stream.outputWidth).toBe(640);
+  await tick(2000, 300000);
+  expect(stream.outputWidth).toBe(480);
+  await tick(3000, 300000);
+  await tick(4000, 300000);
+  expect(stream.outputWidth).toBe(320);
+  await tick(5000, 300000);
+  await tick(6000, 300000);
+  expect(stream.outputWidth).toBe(320);
+  await tick(7000, 0);
+  expect(stream.outputWidth).toBe(320);
+  await tick(8000, 0);
+  expect(stream.outputWidth).toBe(480);
+  await tick(9000, 0);
+  await tick(10000, 0);
+  expect(stream.outputWidth).toBe(640);
+  expect(stream.getState()).toBe(FrameStreamState.STREAMING);
+  expect(quality).toBe(0.45);
+  expect(encoder.setOutputDimensions.mock.calls).toEqual([
+    [480, 360],
+    [320, 240],
+    [480, 360],
+    [640, 480],
+  ]);
+  expect(stream.outputWidth).toBe(640);
+  expect(scheduler.requests).toBeGreaterThan(1);
+  expect(encoder.encode).toHaveBeenCalledTimes(5);
+  qualityCoordinator.destroy();
+  resolution.destroy();
+  stream.stop();
+  client.destroy();
 });

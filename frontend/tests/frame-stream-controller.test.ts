@@ -325,4 +325,64 @@ describe("FrameStreamController", () => {
     expect(client.sent).not.toHaveBeenCalled();
     expect(stream.getState()).toBe(FrameStreamState.STOPPED);
   });
+
+  it("updates output resolution while stopped without changing stream settings", () => {
+    const { stream, encoder } = createStream();
+    let width = 640;
+    let height = 480;
+    const setOutputDimensions = vi.fn(
+      (nextWidth: number, nextHeight: number) => {
+        width = nextWidth;
+        height = nextHeight;
+      },
+    );
+    Object.defineProperties(encoder, {
+      outputWidth: { get: () => width },
+      outputHeight: { get: () => height },
+      setOutputDimensions: { value: setOutputDimensions },
+    });
+    const before = stream.getMetrics();
+    stream.setOutputResolution(320, 240);
+    expect([
+      stream.targetFps,
+      stream.jpegQuality,
+      stream.outputWidth,
+      stream.outputHeight,
+    ]).toEqual([8, 0.8, 320, 240]);
+    expect(stream.getMetrics()).toMatchObject({
+      framesSent: before.framesSent,
+      outputWidth: 320,
+      outputHeight: 240,
+    });
+    expect(setOutputDimensions).toHaveBeenCalledOnce();
+  });
+
+  it("changes resolution during streaming without another loop or encode", async () => {
+    const { stream, encoder, scheduler, camera, client } = createStream();
+    let width = 640;
+    let height = 480;
+    const setOutputDimensions = vi.fn(
+      (nextWidth: number, nextHeight: number) => {
+        width = nextWidth;
+        height = nextHeight;
+      },
+    );
+    Object.defineProperties(encoder, {
+      outputWidth: { get: () => width },
+      outputHeight: { get: () => height },
+      setOutputDimensions: { value: setOutputDimensions },
+    });
+    stream.start();
+    const loops = scheduler.requests;
+    stream.setOutputResolution(480, 360);
+    expect(stream.getState()).toBe(FrameStreamState.STREAMING);
+    expect(scheduler.requests).toBe(loops);
+    expect(encoder.encode).not.toHaveBeenCalled();
+    expect(camera.state).toBe(CameraState.READY);
+    expect(client.state).toBe(WebSocketClientState.OPEN);
+    stream.setOutputResolution(480, 360);
+    expect(setOutputDimensions).toHaveBeenCalledTimes(2);
+    stream.stop();
+    expect(stream.getState()).toBe(FrameStreamState.STOPPED);
+  });
 });
