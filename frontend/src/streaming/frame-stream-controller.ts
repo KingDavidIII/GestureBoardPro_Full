@@ -170,6 +170,12 @@ export class FrameStreamController {
   get jpegQuality(): number {
     return this.encoder.jpegQuality;
   }
+  get outputWidth(): number {
+    return this.encoder.outputWidth ?? 0;
+  }
+  get outputHeight(): number {
+    return this.encoder.outputHeight ?? 0;
+  }
   setJpegQuality(quality: number): void {
     const previous = this.encoder.jpegQuality;
     this.encoder.setQuality(quality);
@@ -182,6 +188,27 @@ export class FrameStreamController {
     if (validated === this.currentTargetFps) return;
     this.currentTargetFps = validated;
     this.metrics = { ...this.metrics, targetFps: validated };
+    this.emitMetrics();
+  }
+  setOutputResolution(width: number, height: number): void {
+    if (!this.encoder.setOutputDimensions)
+      throw this.error(
+        FrameStreamErrorCode.INVALID_CONFIGURATION,
+        "Encoder does not support output resolution changes.",
+      );
+    const previousWidth = this.outputWidth;
+    const previousHeight = this.outputHeight;
+    this.encoder.setOutputDimensions(width, height);
+    if (
+      previousWidth === this.outputWidth &&
+      previousHeight === this.outputHeight
+    )
+      return;
+    this.metrics = {
+      ...this.metrics,
+      outputWidth: this.outputWidth,
+      outputHeight: this.outputHeight,
+    };
     this.emitMetrics();
   }
   getMetrics(): FrameStreamMetrics {
@@ -326,6 +353,8 @@ export class FrameStreamController {
     return {
       targetFps: this.currentTargetFps,
       jpegQuality: this.encoder.jpegQuality,
+      outputWidth: this.outputWidth,
+      outputHeight: this.outputHeight,
       startedAt: null,
       stoppedAt: null,
       framesAttempted: 0,

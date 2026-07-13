@@ -10,6 +10,8 @@ import {
   type AdaptiveQualitySnapshot,
   type AdaptiveMode,
   type AdaptiveStreamSnapshot,
+  type AdaptiveResolutionMode,
+  type AdaptiveResolutionSnapshot,
   FrameStreamState,
   type FrameStreamController,
   type FrameStreamEvent,
@@ -46,6 +48,14 @@ export interface DiagnosticDashboardOptions {
       listener: (snapshot: AdaptiveQualitySnapshot) => void,
     ): () => void;
   };
+  readonly adaptiveResolution?: {
+    getSnapshot(): AdaptiveResolutionSnapshot;
+    setMode(mode: AdaptiveResolutionMode): void;
+    reset(): void;
+    subscribe(
+      listener: (snapshot: AdaptiveResolutionSnapshot) => void,
+    ): () => void;
+  };
 }
 
 export class DiagnosticDashboard {
@@ -60,6 +70,9 @@ export class DiagnosticDashboard {
   private readonly qualityDiagnostics: HTMLDivElement;
   private readonly qualityStatus: HTMLOutputElement;
   private readonly qualityModeButton: HTMLButtonElement;
+  private readonly resolutionDiagnostics: HTMLDivElement;
+  private readonly resolutionStatus: HTMLOutputElement;
+  private readonly resolutionModeButton: HTMLButtonElement;
   private readonly connectButton: HTMLButtonElement;
   private readonly disconnectButton: HTMLButtonElement;
   private readonly pingButton: HTMLButtonElement;
@@ -78,6 +91,7 @@ export class DiagnosticDashboard {
   private readonly unsubscribeStream: (() => void) | null;
   private readonly unsubscribeAdaptive: (() => void) | null;
   private readonly unsubscribeQuality: (() => void) | null;
+  private readonly unsubscribeResolution: (() => void) | null;
   private cameraState: CameraState | null;
   private streamState: FrameStreamState | null;
   private supportsAnnotations = false;
@@ -88,6 +102,7 @@ export class DiagnosticDashboard {
   private schedulerMetrics: SchedulerMetadata | null = null;
   private adaptiveSnapshot: AdaptiveStreamSnapshot | null;
   private qualitySnapshot: AdaptiveQualitySnapshot | null;
+  private resolutionSnapshot: AdaptiveResolutionSnapshot | null;
 
   constructor(
     private readonly root: HTMLElement,
@@ -99,6 +114,8 @@ export class DiagnosticDashboard {
     this.streamState = this.options.stream?.getState() ?? null;
     this.adaptiveSnapshot = this.options.adaptive?.getSnapshot() ?? null;
     this.qualitySnapshot = this.options.adaptiveQuality?.getSnapshot() ?? null;
+    this.resolutionSnapshot =
+      this.options.adaptiveResolution?.getSnapshot() ?? null;
     this.root.innerHTML = `<main class="diagnostic-dashboard" aria-labelledby="dashboard-title">
       <header><p class="eyebrow">GestureBoard Pro</p><h1 id="dashboard-title">Protocol diagnostics</h1><output class="connection-status" aria-live="polite" aria-atomic="true"></output></header>
       <section aria-labelledby="connection-controls-title"><h2 id="connection-controls-title">Connection</h2><p class="connection-url"></p><div class="controls"><button type="button" data-action="connect">Connect</button><button type="button" data-action="disconnect">Disconnect</button><button type="button" data-action="ping">Send ping</button><button type="button" data-action="reset">Reset runtime</button></div></section>
@@ -107,6 +124,7 @@ export class DiagnosticDashboard {
       <section aria-labelledby="server-scheduling-title"><h2 id="server-scheduling-title">Server-side frame scheduling</h2><div class="server-scheduler-diagnostics"></div></section>
       <section aria-labelledby="adaptive-stream-title"><h2 id="adaptive-stream-title">Adaptive stream control</h2><button type="button" data-action="adaptive-mode" aria-label="Switch adaptive stream mode"></button><output class="adaptive-stream-status" aria-live="polite" aria-atomic="true"></output><div class="adaptive-stream-diagnostics"></div></section>
       <section aria-labelledby="adaptive-quality-title"><h2 id="adaptive-quality-title">Adaptive JPEG quality</h2><button type="button" data-action="quality-mode" aria-label="Switch adaptive JPEG quality mode"></button><output class="adaptive-quality-status" aria-live="polite" aria-atomic="true"></output><div class="adaptive-quality-diagnostics"></div></section>
+      <section aria-labelledby="adaptive-resolution-title"><h2 id="adaptive-resolution-title">Adaptive resolution</h2><button type="button" data-action="resolution-mode" aria-label="Switch adaptive resolution mode"></button><output class="adaptive-resolution-status" aria-live="polite" aria-atomic="true"></output><div class="adaptive-resolution-diagnostics"></div></section>
       <section aria-labelledby="annotation-title"><h2 id="annotation-title">Annotated feedback</h2><button type="button" data-action="annotation" aria-label="Enable annotated frame feedback">Enable annotated feedback</button><output class="annotation-status" aria-live="polite"></output><img class="annotated-preview" alt="Latest annotated gesture frame" /><p class="annotation-diagnostics"></p></section>
       <section aria-labelledby="message-log-title"><h2 id="message-log-title">Message log</h2><ol class="message-log" aria-live="polite" aria-relevant="additions"></ol></section>
     </main>`;
@@ -121,6 +139,11 @@ export class DiagnosticDashboard {
     this.qualityDiagnostics = this.element(".adaptive-quality-diagnostics");
     this.qualityStatus = this.element(".adaptive-quality-status");
     this.qualityModeButton = this.element('[data-action="quality-mode"]');
+    this.resolutionDiagnostics = this.element(
+      ".adaptive-resolution-diagnostics",
+    );
+    this.resolutionStatus = this.element(".adaptive-resolution-status");
+    this.resolutionModeButton = this.element('[data-action="resolution-mode"]');
     this.connectButton = this.element('[data-action="connect"]');
     this.disconnectButton = this.element('[data-action="disconnect"]');
     this.pingButton = this.element('[data-action="ping"]');
@@ -162,6 +185,9 @@ export class DiagnosticDashboard {
     this.qualityModeButton.addEventListener("click", () =>
       this.toggleQualityMode(),
     );
+    this.resolutionModeButton.addEventListener("click", () =>
+      this.toggleResolutionMode(),
+    );
     this.unsubscribe = this.client.subscribe((event) =>
       this.handleEvent(event),
     );
@@ -183,6 +209,11 @@ export class DiagnosticDashboard {
         this.qualitySnapshot = snapshot;
         this.renderQuality();
       }) ?? null;
+    this.unsubscribeResolution =
+      this.options.adaptiveResolution?.subscribe((snapshot) => {
+        this.resolutionSnapshot = snapshot;
+        this.renderResolution();
+      }) ?? null;
     if (this.options.camera) void this.options.camera.attachPreview(this.video);
     this.renderState(this.client.getState());
     this.renderCamera();
@@ -190,6 +221,7 @@ export class DiagnosticDashboard {
     this.renderServerScheduler();
     this.renderAdaptive();
     this.renderQuality();
+    this.renderResolution();
     this.renderAnnotation();
   }
 
@@ -201,8 +233,10 @@ export class DiagnosticDashboard {
     this.unsubscribeStream?.();
     this.unsubscribeAdaptive?.();
     this.unsubscribeQuality?.();
+    this.unsubscribeResolution?.();
     this.options.adaptive?.reset();
     this.options.adaptiveQuality?.reset();
+    this.options.adaptiveResolution?.reset();
     this.options.camera?.detachPreview();
     this.clearAnnotation();
     this.root.replaceChildren();
@@ -441,6 +475,43 @@ export class DiagnosticDashboard {
     const percent = (value: number) =>
       Number.isFinite(value) ? `${(value * 100).toFixed(0)}%` : "unavailable";
     this.qualityDiagnostics.textContent = `Mode: ${mode}; current JPEG quality: ${percent(snapshot.quality)}; minimum quality: ${percent(snapshot.minimumQuality)}; maximum quality: ${percent(snapshot.maximumQuality)}; latest direction: ${decision?.direction ?? "none"}; latest reason: ${decision?.reason ?? "none"}; healthy samples: ${snapshot.healthySamples}; overload samples: ${snapshot.overloadSamples}; latest encoded payload: ${snapshot.latestPayloadBytes} bytes; latest WebSocket buffered: ${snapshot.latestBufferedBytes} bytes; cooldown: ${snapshot.cooldownActive ? "active" : "inactive"}.`;
+  }
+  private toggleResolutionMode(): void {
+    const snapshot = this.resolutionSnapshot;
+    if (!snapshot) return;
+    this.options.adaptiveResolution?.setMode(
+      snapshot.mode === "adaptive" ? "fixed" : "adaptive",
+    );
+  }
+  private renderResolution(): void {
+    const snapshot = this.resolutionSnapshot;
+    this.resolutionModeButton.disabled = !snapshot;
+    if (!snapshot) {
+      this.resolutionModeButton.textContent = "Resolution control unavailable";
+      this.resolutionStatus.textContent =
+        "No adaptive resolution decision available.";
+      this.resolutionDiagnostics.textContent =
+        "Bandwidth and resolution diagnostics are unavailable.";
+      return;
+    }
+    const decision = snapshot.latestDecision;
+    const estimate = snapshot.estimate;
+    const bitrate =
+      estimate.smoothedBitrateBps === null
+        ? "unavailable"
+        : `${Math.min(estimate.smoothedBitrateBps, 999999999).toFixed(0)} bps`;
+    const headroom =
+      decision?.headroomRatio === null || decision?.headroomRatio === undefined
+        ? "unavailable"
+        : `${Math.min(decision.headroomRatio, 999999).toFixed(2)}×`;
+    this.resolutionModeButton.textContent =
+      snapshot.mode === "adaptive"
+        ? "Use Fixed resolution"
+        : "Use Adaptive resolution";
+    this.resolutionStatus.textContent = decision
+      ? `Latest resolution adjustment: ${decision.direction}; ${decision.reason}.`
+      : "Latest resolution adjustment: none in this epoch.";
+    this.resolutionDiagnostics.textContent = `Bandwidth estimate: ${bitrate}; confidence: ${estimate.confidence}; pressure: ${estimate.pressure}; estimated bytes per second: ${estimate.estimatedBytesPerSecond === null ? "unavailable" : Math.min(estimate.estimatedBytesPerSecond, 999999999).toFixed(0)}; average frame size: ${estimate.averageFrameBytes ?? "unavailable"}; buffered: ${estimate.latestBufferedBytes}; payload: ${estimate.latestPayloadBytes}. Resolution mode: ${snapshot.mode === "adaptive" ? "Adaptive" : "Fixed"}; current profile: ${snapshot.currentProfile.id}; dimensions: ${snapshot.currentProfile.width}×${snapshot.currentProfile.height}; minimum profile: ${snapshot.minimumProfile.id}; maximum profile: ${snapshot.maximumProfile.id}; healthy samples: ${snapshot.healthySamples}; overload samples: ${snapshot.overloadSamples}; headroom: ${headroom}; cooldown: ${snapshot.cooldownActive ? "active" : "inactive"}.`;
   }
   private append(title: string, detail: string): void {
     const entry = document.createElement("li");

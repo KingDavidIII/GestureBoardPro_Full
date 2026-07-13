@@ -172,6 +172,36 @@ The dashboard renders browser transport, server scheduler, adaptive FPS, and
 adaptive JPEG-quality metrics separately. Alpha 7 changes only JPEG quality and
 FPS: it does not negotiate codecs or estimate available bandwidth.
 
+### Adaptive resolution and bandwidth estimation
+
+Alpha 8 adds an application-level throughput estimate; it is **not** a true
+network bandwidth measurement. The estimator samples successful frame sends,
+payload sizes, WebSocket buffered bytes, and cumulative drop/failure counters.
+It reports instantaneous throughput when a sample window is at least 250 ms,
+then smooths it with an EWMA (alpha 0.25). Confidence is unavailable before a
+baseline, then low, medium after five usable windows, and high after twelve.
+Counter regression, stream stop, socket loss, reconnect, and a mode switch all
+start a fresh epoch.
+
+The default immutable resolution ladder is `low` 320×240, `medium` 480×360,
+and `high` 640×480. Resolution uses its own Adaptive/Fixed control: Fixed
+preserves the current profile while diagnostics continue. Adaptive mode first
+allows JPEG quality to react to short-term transport pressure. Only after three
+overloaded samples, normally at the configured quality floor, does it lower one
+profile. Healthy bandwidth with 1.30× next-profile headroom must persist for
+twenty samples before it restores one profile. A 4000 ms cooldown prevents
+rapid changes. Quality is evaluated before resolution; server scheduler pressure
+continues to control FPS independently.
+
+Changing profile changes only future JPEG canvas output dimensions. It does not
+restart the camera, WebSocket, stream, or capture loop, and an in-flight encode
+retains the dimensions captured at its start. A manual stream restart preserves
+the last profile but requires fresh estimator samples. Reconnect never restarts
+streaming. Current browser transport, bandwidth, resolution, quality, FPS, and
+server scheduler diagnostics remain separate. Remaining limitations include no
+codec negotiation or network-layer measurement; the estimator observes only
+this application's send path.
+
 ## Testing
 
 Vitest runs in JSDOM. Camera, media stream, canvas, scheduler, clock, encoder,

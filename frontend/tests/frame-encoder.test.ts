@@ -126,4 +126,59 @@ describe("CanvasFrameEncoder", () => {
       expect(() => encoder.setQuality(quality)).toThrow(FrameEncodingError);
     },
   );
+
+  it("uses explicitly changed output dimensions for future encodes", async () => {
+    const element = canvas();
+    const encoder = new CanvasFrameEncoder({ canvasFactory: () => element });
+    encoder.setOutputDimensions(320, 240);
+    const frame = await encoder.encode(source());
+    expect(frame).toMatchObject({
+      width: 320,
+      height: 240,
+      mimeType: "image/jpeg",
+    });
+    expect(encoder.outputWidth).toBe(320);
+    expect(encoder.outputHeight).toBe(240);
+  });
+
+  it("changes dimensions between encodes without changing JPEG quality", async () => {
+    const element = canvas();
+    const encoder = new CanvasFrameEncoder({
+      jpegQuality: 0.7,
+      canvasFactory: () => element,
+    });
+    encoder.setOutputDimensions(480, 360);
+    const first = await encoder.encode(source());
+    encoder.setOutputDimensions(320, 240);
+    const second = await encoder.encode(source());
+    expect([first.width, first.height, second.width, second.height]).toEqual([
+      480, 360, 320, 240,
+    ]);
+    expect(encoder.jpegQuality).toBe(0.7);
+  });
+
+  it("captures dimensions for an in-flight encode", async () => {
+    const callbacks: BlobCallback[] = [];
+    const element = canvas();
+    element.toBlob = ((callback: BlobCallback) =>
+      callbacks.push(callback)) as typeof element.toBlob;
+    const encoder = new CanvasFrameEncoder({ canvasFactory: () => element });
+    encoder.setOutputDimensions(480, 360);
+    const pending = encoder.encode(source());
+    encoder.setOutputDimensions(320, 240);
+    callbacks[0]?.(new Blob(["jpeg"], { type: "image/jpeg" }));
+    await expect(pending).resolves.toMatchObject({ width: 480, height: 360 });
+  });
+
+  it.each([
+    [0, 240],
+    [320, 0],
+    [320.5, 240],
+    [Number.MAX_SAFE_INTEGER + 1, 240],
+  ])("rejects invalid output dimensions %#", (width, height) => {
+    const encoder = new CanvasFrameEncoder();
+    expect(() => encoder.setOutputDimensions(width, height)).toThrow(
+      FrameEncodingError,
+    );
+  });
 });

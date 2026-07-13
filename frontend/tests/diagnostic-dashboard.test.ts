@@ -5,6 +5,7 @@ import { DiagnosticDashboard, type ObjectUrlApi } from "../src/dashboard";
 import {
   FrameStreamState,
   type AdaptiveQualitySnapshot,
+  type AdaptiveResolutionSnapshot,
   type AdaptiveStreamSnapshot,
   type FrameStreamController,
 } from "../src/streaming";
@@ -913,4 +914,205 @@ describe("DiagnosticDashboard", () => {
     expect(root.querySelector(".adaptive-quality-status img")).toBeNull();
     expect(root.querySelector("[onerror]")).toBeNull();
   });
+});
+
+it("renders safe separate bandwidth and adaptive-resolution diagnostics", () => {
+  const root = document.createElement("div");
+  const client = new GestureWebSocketClient("ws://board.test/ws/", {
+    socketFactory: () => new FakeWebSocket(),
+  });
+  let mode: "adaptive" | "fixed" = "adaptive";
+  const snapshot = () =>
+    Object.freeze({
+      mode,
+      currentProfile: Object.freeze({
+        id: "high<unsafe>",
+        width: 640,
+        height: 480,
+      }),
+      minimumProfile: Object.freeze({ id: "low", width: 320, height: 240 }),
+      maximumProfile: Object.freeze({ id: "high", width: 640, height: 480 }),
+      latestDecision: Object.freeze({
+        direction: "decreased" as const,
+        reason: "sustained_overload" as const,
+        headroomRatio: null,
+      }),
+      estimate: Object.freeze({
+        instantaneousBitrateBps: null,
+        smoothedBitrateBps: null,
+        estimatedBytesPerSecond: null,
+        averageFrameBytes: null,
+        sampleCount: 0,
+        elapsedWindowMs: 0,
+        confidence: "unavailable" as const,
+        pressure: "unknown" as const,
+        latestBufferedBytes: 0,
+        latestPayloadBytes: 0,
+        sendFailureDelta: 0,
+        backpressureDropDelta: 0,
+      }),
+      healthySamples: 0,
+      overloadSamples: 3,
+      cooldownActive: true,
+    });
+  const dashboard = new DiagnosticDashboard(root, client, {
+    adaptiveResolution: {
+      getSnapshot: snapshot as () => AdaptiveResolutionSnapshot,
+      setMode: (next) => {
+        mode = next;
+      },
+      reset: vi.fn(),
+      subscribe: () => () => undefined,
+    },
+  });
+  expect(root.querySelector("#adaptive-resolution-title")?.textContent).toBe(
+    "Adaptive resolution",
+  );
+  const diagnostics = root.querySelector(".adaptive-resolution-diagnostics");
+  expect(diagnostics?.textContent).toContain("Bandwidth estimate: unavailable");
+  expect(diagnostics?.textContent).toContain("high<unsafe>");
+  expect(diagnostics?.innerHTML).not.toContain("<unsafe>");
+  const button = root.querySelector<HTMLButtonElement>(
+    '[data-action="resolution-mode"]',
+  );
+  expect(button?.getAttribute("aria-label")).toBe(
+    "Switch adaptive resolution mode",
+  );
+  button?.click();
+  expect(mode).toBe("fixed");
+  dashboard.destroy();
+});
+
+it("renders reconnect-reset resolution diagnostics with preserved profile and no adjustment", () => {
+  const root = document.createElement("div");
+  const client = new GestureWebSocketClient("ws://board.test/ws/", {
+    socketFactory: () => new FakeWebSocket(),
+  });
+  const snapshot = Object.freeze({
+    mode: "adaptive" as const,
+    currentProfile: Object.freeze({ id: "medium", width: 480, height: 360 }),
+    minimumProfile: Object.freeze({ id: "low", width: 320, height: 240 }),
+    maximumProfile: Object.freeze({ id: "high", width: 640, height: 480 }),
+    latestDecision: null,
+    estimate: Object.freeze({
+      instantaneousBitrateBps: null,
+      smoothedBitrateBps: null,
+      estimatedBytesPerSecond: null,
+      averageFrameBytes: null,
+      sampleCount: 0,
+      elapsedWindowMs: 0,
+      confidence: "unavailable" as const,
+      pressure: "unknown" as const,
+      latestBufferedBytes: 0,
+      latestPayloadBytes: 0,
+      sendFailureDelta: 0,
+      backpressureDropDelta: 0,
+    }),
+    healthySamples: 0,
+    overloadSamples: 0,
+    cooldownActive: false,
+  });
+  const dashboard = new DiagnosticDashboard(root, client, {
+    adaptiveResolution: {
+      getSnapshot: () => snapshot,
+      setMode: vi.fn(),
+      reset: vi.fn(),
+      subscribe: () => () => undefined,
+    },
+  });
+  const status = root.querySelector(".adaptive-resolution-status");
+  const diagnostics = root.querySelector(".adaptive-resolution-diagnostics");
+  expect(status?.getAttribute("aria-live")).toBe("polite");
+  expect(status?.textContent).toContain("none in this epoch");
+  expect(diagnostics?.textContent).toContain("current profile: medium");
+  expect(diagnostics?.textContent).toContain("confidence: unavailable");
+  expect(diagnostics?.textContent).not.toMatch(/NaN|Infinity/);
+  dashboard.destroy();
+});
+
+it("updates resolution diagnostics through its subscription lifecycle", () => {
+  const root = document.createElement("div");
+  const client = new GestureWebSocketClient("ws://board.test/ws/", {
+    socketFactory: () => new FakeWebSocket(),
+  });
+  const listeners: Array<(value: AdaptiveResolutionSnapshot) => void> = [];
+  let snapshot: AdaptiveResolutionSnapshot = Object.freeze({
+    mode: "adaptive",
+    currentProfile: Object.freeze({ id: "medium", width: 480, height: 360 }),
+    minimumProfile: Object.freeze({ id: "low", width: 320, height: 240 }),
+    maximumProfile: Object.freeze({ id: "high", width: 640, height: 480 }),
+    latestDecision: Object.freeze({
+      previousProfile: "high",
+      profile: "medium",
+      previousWidth: 640,
+      previousHeight: 480,
+      width: 480,
+      height: 360,
+      direction: "decreased",
+      reason: "sustained_overload",
+      healthySamples: 0,
+      overloadSamples: 3,
+      estimatedBandwidth: null,
+      estimatedRequiredBandwidth: null,
+      headroomRatio: null,
+      cooldownActive: false,
+      adjustedAt: 1,
+    }),
+    estimate: Object.freeze({
+      instantaneousBitrateBps: 1,
+      smoothedBitrateBps: 1,
+      estimatedBytesPerSecond: 1,
+      averageFrameBytes: 1,
+      sampleCount: 1,
+      elapsedWindowMs: 1,
+      confidence: "low",
+      pressure: "overloaded",
+      latestBufferedBytes: 1,
+      latestPayloadBytes: 1,
+      sendFailureDelta: 1,
+      backpressureDropDelta: 0,
+    }),
+    healthySamples: 0,
+    overloadSamples: 3,
+    cooldownActive: false,
+  });
+  const dashboard = new DiagnosticDashboard(root, client, {
+    adaptiveResolution: {
+      getSnapshot: () => snapshot,
+      setMode: vi.fn(),
+      reset: vi.fn(),
+      subscribe: (listener) => {
+        listeners.push(listener);
+        return () => undefined;
+      },
+    },
+  });
+  expect(
+    root.querySelector(".adaptive-resolution-status")?.textContent,
+  ).toContain("decreased");
+  snapshot = Object.freeze({
+    ...snapshot,
+    latestDecision: null,
+    estimate: Object.freeze({
+      ...snapshot.estimate,
+      instantaneousBitrateBps: null,
+      smoothedBitrateBps: null,
+      estimatedBytesPerSecond: null,
+      confidence: "unavailable",
+      pressure: "unknown",
+      elapsedWindowMs: 0,
+    }),
+    healthySamples: 0,
+    overloadSamples: 0,
+  });
+  listeners.forEach((listener) => listener(snapshot));
+  expect(
+    root.querySelector(".adaptive-resolution-status")?.textContent,
+  ).toContain("none in this epoch");
+  const text =
+    root.querySelector(".adaptive-resolution-diagnostics")?.textContent ?? "";
+  expect(text).toContain("current profile: medium");
+  expect(text).toContain("confidence: unavailable");
+  expect(text).not.toMatch(/NaN|Infinity/);
+  dashboard.destroy();
 });
