@@ -2,6 +2,7 @@
 # Environment Variables
 # ==========================
 .env
+frontend/.env.development.local
 !.env.example
 
 # ==========================
@@ -70,3 +71,4 @@ pip-wheel-metadata/
 # ==========================
 *.tmp
 *.bak
+backend/runtime/

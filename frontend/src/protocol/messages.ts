@@ -85,6 +85,46 @@ export interface SchedulerMetadata {
   readonly processing_time_ms: number;
 }
 
+export type GestureIdentifier =
+  | "open_palm"
+  | "closed_fist"
+  | "point"
+  | "pinch"
+  | "unknown";
+export type RecognitionHandedness = "left" | "right" | "unknown";
+export type GestureTransitionKind = "activated" | "changed" | "released";
+export interface RecognitionPrimaryHand {
+  readonly handedness: RecognitionHandedness;
+  readonly confidence: number;
+}
+export interface RecognitionCandidate {
+  readonly gesture_id: GestureIdentifier;
+  readonly confidence: number;
+  readonly reason: string;
+}
+export interface RecognitionStableGesture {
+  readonly gesture_id: GestureIdentifier;
+  readonly confidence: number;
+  readonly confirmed_frames: number;
+  readonly since_ms: number;
+}
+export interface RecognitionTransition {
+  readonly event_id: number;
+  readonly kind: GestureTransitionKind;
+  readonly previous_gesture: GestureIdentifier | null;
+  readonly gesture: GestureIdentifier | null;
+  readonly confidence: number;
+}
+export interface GestureRecognition {
+  readonly schema_version: 1;
+  readonly frame_sequence: number;
+  readonly hand_count: number;
+  readonly primary_hand: RecognitionPrimaryHand | null;
+  readonly candidate: RecognitionCandidate | null;
+  readonly stable: RecognitionStableGesture | null;
+  readonly transition: RecognitionTransition | null;
+}
+
 export interface GestureResultMessage {
   readonly protocol_version: ProtocolVersion;
   readonly type: "gesture.result";
@@ -108,6 +148,7 @@ export interface GestureResultMessage {
     readonly byte_length?: number;
     readonly error_code?: string;
   };
+  readonly recognition?: GestureRecognition | null;
 }
 
 export interface PongMessage {

@@ -55,6 +55,7 @@ class GesturePipelineResult:
 
     annotated_frame: np.ndarray
     hands: tuple[HandGestureResult, ...]
+    mediapipe_result: object | None = None
 
     @property
     def hand_count(self) -> int:
@@ -136,6 +137,7 @@ class GesturePipeline:
         return GesturePipelineResult(
             annotated_frame=annotated_frame,
             hands=tuple(results),
+            mediapipe_result=getattr(self.processor, "last_mediapipe_result", None),
         )
 
     def close(self) -> None:

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CameraState, type CameraController } from "../src/camera";
 import { DiagnosticDashboard, type ObjectUrlApi } from "../src/dashboard";
+import { RecognitionStateStore } from "../src/recognition";
 import {
   FrameStreamState,
   type AdaptiveQualitySnapshot,
@@ -72,9 +73,12 @@ describe("DiagnosticDashboard", () => {
   let qualitySnapshot: AdaptiveQualitySnapshot;
   let qualityListeners: Array<(snapshot: AdaptiveQualitySnapshot) => void>;
   let qualityReset: ReturnType<typeof vi.fn>;
+  let recognition: RecognitionStateStore;
 
   beforeEach(() => {
     root = document.createElement("div");
+    recognition = new RecognitionStateStore();
+    recognition.beginEpoch(1);
     document.body.append(root);
     socket = new FakeWebSocket();
     sockets = [];
@@ -173,6 +177,7 @@ describe("DiagnosticDashboard", () => {
       subscribe: vi.fn(() => vi.fn()),
     } as unknown as FrameStreamController;
     dashboard = new DiagnosticDashboard(root, client, {
+      recognition,
       camera,
       stream,
       objectUrls: {
@@ -981,6 +986,73 @@ it("renders safe separate bandwidth and adaptive-resolution diagnostics", () => 
   button?.click();
   expect(mode).toBe("fixed");
   dashboard.destroy();
+});
+
+describe("recognition dashboard rendering", () => {
+  it("renders immutable recognition state as plain text and announces once", () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const socket = new FakeWebSocket();
+    const client = new GestureWebSocketClient("ws://example.test/ws/", {
+      socketFactory: () => socket,
+    });
+    const recognition = new RecognitionStateStore();
+    recognition.beginEpoch(1);
+    const dashboard = new DiagnosticDashboard(root, client, { recognition });
+    recognition.setCapabilityAvailable(true, 1);
+    recognition.applyRecognition(
+      {
+        schema_version: 1,
+        frame_sequence: 7,
+        hand_count: 1,
+        primary_hand: { handedness: "right", confidence: 0.9 },
+        candidate: {
+          gesture_id: "open_palm",
+          confidence: 0,
+          reason: "<img src=x onerror=alert(1)>",
+        },
+        stable: {
+          gesture_id: "open_palm",
+          confidence: 0.8,
+          confirmed_frames: 0,
+          since_ms: 0,
+        },
+        transition: {
+          event_id: 1,
+          kind: "activated",
+          previous_gesture: null,
+          gesture: "open_palm",
+          confidence: 0.8,
+        },
+      },
+      1,
+    );
+    const text =
+      root.querySelector(".recognition-diagnostics")?.textContent ?? "";
+    expect(root.textContent).toContain("Gesture recognition");
+    expect(text).toContain("Capability: Available");
+    expect(text).toContain("frame: 7");
+    expect(text).toContain("Open Palm");
+    expect(text).toContain("0%");
+    expect(text).toContain("0 ms");
+    expect(text).toContain("<img src=x onerror=alert(1)>");
+    expect(root.querySelector(".recognition-diagnostics img")).toBeNull();
+    expect(
+      root.querySelector(".recognition-live")?.getAttribute("aria-live"),
+    ).toBe("polite");
+    expect(root.querySelector(".recognition-live")?.textContent).toBe(
+      "Open Palm activated",
+    );
+    const snapshot = recognition.getSnapshot().recognition;
+    if (snapshot === null)
+      throw new Error("Recognition snapshot was unexpectedly empty.");
+    recognition.applyRecognition({ ...snapshot, transition: null }, 1);
+    expect(root.querySelector(".recognition-live")?.textContent).toBe(
+      "Open Palm activated",
+    );
+    dashboard.destroy();
+    root.remove();
+  });
 });
 
 it("renders reconnect-reset resolution diagnostics with preserved profile and no adjustment", () => {

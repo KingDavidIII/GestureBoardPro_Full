@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import FrozenInstanceError
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import cv2
@@ -271,6 +272,71 @@ class BridgeProcessingTests(SimpleTestCase):
                 with self.assertRaises(WebSocketRuntimeBridgeError):
                     self.bridge.process_frame(b"b", sequence=value)
         self.assertEqual(self.runtime.process.call_count, 1)
+
+    def test_recognition_uses_the_existing_pipeline_mediapipe_result(self) -> None:
+        landmarks = [SimpleNamespace(x=0.0, y=0.0, z=0.0) for _ in range(21)]
+        for (mcp, pip, tip), x in zip(
+            ((1, 3, 4), (5, 6, 8), (9, 10, 12), (13, 14, 16), (17, 18, 20)),
+            (-2, -1, 0, 1, 2),
+            strict=True,
+        ):
+            landmarks[mcp] = SimpleNamespace(x=x, y=0.0, z=0.0)
+            landmarks[pip] = SimpleNamespace(x=x, y=1.0, z=0.0)
+            landmarks[tip] = SimpleNamespace(x=x, y=3.0, z=0.0)
+        media_result = SimpleNamespace(
+            multi_hand_landmarks=[SimpleNamespace(landmark=landmarks)],
+            multi_handedness=[
+                SimpleNamespace(
+                    classification=[SimpleNamespace(label="Right", score=0.9)]
+                )
+            ],
+        )
+        original = runtime_result()
+        pipeline = GesturePipelineResult(
+            original.annotated_frame, original.pipeline_result.hands, media_result
+        )
+        self.runtime.process.return_value = GestureRuntimeResult(
+            pipeline,
+            original.selected_hand,
+            original.selected_identity,
+            original.selection_decision,
+            original.observation,
+            original.engine_result,
+        )
+        response = self.bridge.process_frame(b"valid")
+        self.runtime.process.assert_called_once_with(self.decoder.frame, timestamp=None)
+        self.assertEqual(
+            response["recognition"]["candidate"]["gesture_id"], "open_palm"
+        )
+        self.assertEqual(response["recognition"]["hand_count"], 1)
+
+    def test_recognition_failure_is_nullable_and_does_not_poison_runtime_result(
+        self,
+    ) -> None:
+        recognition = MagicMock()
+        recognition.process.side_effect = ValueError("recognition fixture failure")
+        self.bridge = WebSocketRuntimeBridge(
+            self.runtime, self.decoder, recognition_service=recognition
+        )
+        original = runtime_result()
+        media_result = SimpleNamespace(multi_hand_landmarks=[], multi_handedness=[])
+        pipeline = GesturePipelineResult(
+            original.annotated_frame, original.pipeline_result.hands, media_result
+        )
+        self.runtime.process.return_value = GestureRuntimeResult(
+            pipeline,
+            original.selected_hand,
+            original.selected_identity,
+            original.selection_decision,
+            original.observation,
+            original.engine_result,
+        )
+        with self.assertLogs(
+            "gestureboard.services.websocket_runtime_bridge", level="ERROR"
+        ):
+            response = self.bridge.process_frame(b"valid")
+        self.assertIsNone(response["recognition"])
+        self.assertEqual(response["type"], "gesture.result")
 
 
 class BridgeLifecycleTests(SimpleTestCase):

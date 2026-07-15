@@ -240,6 +240,40 @@ class WebSocketBackpressureTests(SimpleTestCase):
             bridge.release.set()
             patcher.stop()
 
+    async def test_processing_failure_logs_once_without_payload_or_duplicate_result(
+        self,
+    ) -> None:
+        bridge = BlockingBridge()
+        bridge.release.set()
+        bridge.fail_next = True
+        communicator, patcher = await connected(bridge)
+        try:
+            with self.assertLogs(
+                "gestureboard.websocket.consumers", level="ERROR"
+            ) as first_logs:
+                await communicator.send_to(bytes_data=b"private-frame-bytes")
+                error = await communicator.receive_json_from()
+            self.assertEqual(error["type"], "error")
+            self.assertEqual(error["error"]["code"], "internal_error")
+            self.assertIn("ValueError: private failure", "\n".join(first_logs.output))
+            self.assertNotIn("private-frame-bytes", "\n".join(first_logs.output))
+            self.assertTrue(await communicator.receive_nothing(timeout=0.01))
+
+            bridge.fail_next = True
+            with self.assertLogs(
+                "gestureboard.websocket.consumers", level="WARNING"
+            ) as repeated_logs:
+                await communicator.send_to(bytes_data=b"private-frame-bytes")
+                await communicator.receive_json_from()
+            self.assertEqual(len(repeated_logs.output), 1)
+            self.assertIn("Suppressing repeated", repeated_logs.output[0])
+            self.assertEqual(bridge.frames, [b"private-frame-bytes"] * 2)
+            self.assertTrue(await communicator.receive_nothing(timeout=0.01))
+            await communicator.disconnect()
+        finally:
+            bridge.release.set()
+            patcher.stop()
+
     async def test_annotation_disabled_sends_json_only(self) -> None:
         bridge = BlockingBridge()
         bridge.release.set()

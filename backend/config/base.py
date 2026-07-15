@@ -12,6 +12,7 @@ from .environment import (
 )
 from .environment import (
     BACKEND_DIR,
+    get_env,
 )
 from .environment import (
     DEBUG as ENV_DEBUG,
@@ -210,6 +211,13 @@ LOGGING = {
     "root": {
         "handlers": ["console"],
         "level": "INFO",
+    },
+    "loggers": {
+        "gestureboard.recognition.features": {
+            "handlers": ["console"],
+            "level": get_env("RECOGNITION_FEATURES_LOG_LEVEL", "WARNING").upper(),
+            "propagate": False,
+        },
     },
 }
 

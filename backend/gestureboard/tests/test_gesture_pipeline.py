@@ -43,6 +43,18 @@ class GesturePipelineTests(SimpleTestCase):
         self.normalizer.normalize.assert_not_called()
         self.classifier.classify.assert_not_called()
 
+    def test_forwards_the_single_processor_result_for_immediate_recognition(
+        self,
+    ) -> None:
+        raw_result = object()
+        self.processor.last_mediapipe_result = raw_result
+        self.processor.process.return_value = (self.annotated, [])
+
+        result = self.pipeline.process(self.frame)
+
+        self.processor.process.assert_called_once_with(self.frame)
+        self.assertIs(result.mediapipe_result, raw_result)
+
     def test_one_hand_preserves_metadata_and_stage_outputs(self) -> None:
         raw_token = object()
         detected = hand("Right", 0.93, raw_token)
