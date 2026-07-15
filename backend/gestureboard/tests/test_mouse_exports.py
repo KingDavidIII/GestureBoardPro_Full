@@ -13,6 +13,7 @@ class MouseExportsTests(TestCase):
             set(mouse.__all__),
             {
                 "CursorTarget",
+                "ActiveCameraRegion",
                 "GestureMouseService",
                 "MouseEvent",
                 "MouseEventKind",
@@ -24,6 +25,15 @@ class MouseExportsTests(TestCase):
                 "MouseSnapshot",
                 "MouseValidationError",
                 "NullMouseOutputPort",
+                "INDEX_FINGERTIP_LANDMARK_INDEX",
+                "VirtualCursorMapper",
+                "VirtualCursorMappingPolicy",
+                "VirtualCursorMappingResult",
+                "VirtualCursorReason",
+                "VirtualCursorSnapshot",
+                "VirtualCursorTarget",
+                "VirtualSurface",
+                "cursor_target_from_selected_hand",
             },
         )
         self.assertFalse(hasattr(mouse, "MouseStateMachine"))
