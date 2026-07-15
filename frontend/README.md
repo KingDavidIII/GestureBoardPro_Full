@@ -3,6 +3,26 @@
 Sprint 2 Alpha 4 adds deterministic WebSocket recovery to camera streaming and
 optional annotated JPEG feedback. Sprint 2 is not yet complete.
 
+## Recognition diagnostics (Alpha 9)
+
+When `connection.ready` advertises `gesture.recognition.v1`, `gesture.result`
+may include nullable recognition metadata for `open_palm`, `closed_fist`,
+`point`, `pinch`, or `unknown`. No hand has a zero hand count and no candidate;
+`unknown` means a valid hand had no matching rule.
+
+The dashboard distinguishes a frame candidate from a confirmed stable gesture
+and displays backend-provided `activated`, `changed`, and `released`
+transitions. Confirmation/release windows are server controlled; transition
+event IDs are local to a socket epoch. Socket and stream lifecycle resets clear
+diagnostics and polite transition announcements.
+
+Primary recognition uses the backend's packaged MediaPipe Gesture Recognizer
+Task model; the deterministic rule classifier is only its startup fallback.
+Recognition sends no raw landmarks, and a malformed optional recognition
+section clears only recognition diagnostics—not scheduler metadata. It produces
+no keyboard or mouse input and is not a sign-language model. Lighting,
+occlusion, camera angle, and landmark quality can limit accuracy.
+
 ## Commands
 
 Run these from this directory:
@@ -207,3 +227,9 @@ this application's send path.
 Vitest runs in JSDOM. Camera, media stream, canvas, scheduler, clock, encoder,
 and WebSocket tests inject fakes; no test starts a server, requests a real
 camera, renders a native canvas, waits on wall-clock time, or accesses a network.
+
+## Development endpoint override
+
+For local Vite development only, an ignored `.env.development.local` may set
+`VITE_GESTUREBOARD_WS_URL=ws://localhost:5173/ws/`. Production builds use the
+current browser host unless a deployment supplies its own build-time override.

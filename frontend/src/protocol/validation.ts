@@ -2,6 +2,8 @@ import type {
   ErrorMessage,
   GestureEngineDecision,
   GestureLabel,
+  GestureIdentifier,
+  GestureTransitionKind,
   GestureResultMessage,
   HandSelectionDecision,
   ProtocolErrorCode,
@@ -71,6 +73,19 @@ const errorCodes = new Set<ProtocolErrorCode>([
   "reset_failure",
   "internal_error",
 ]);
+const recognitionGestures = new Set<GestureIdentifier>([
+  "open_palm",
+  "closed_fist",
+  "point",
+  "pinch",
+  "unknown",
+]);
+const recognitionHands = new Set(["left", "right", "unknown"]);
+const transitionKinds = new Set<GestureTransitionKind>([
+  "activated",
+  "changed",
+  "released",
+]);
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -125,6 +140,80 @@ function validateAnnotation(value: unknown): void {
     !boundedInteger(value.byte_length, 1, 5 * 1024 * 1024)
   )
     invalid("Invalid available annotation metadata.");
+}
+
+function confidence(value: unknown): boolean {
+  return finite(value) && value >= 0 && value <= 1;
+}
+function recognitionGesture(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    recognitionGestures.has(value as GestureIdentifier)
+  );
+}
+function validateRecognition(value: unknown): void {
+  if (
+    !record(value) ||
+    value.schema_version !== 1 ||
+    !nonNegativeSafeInteger(value.frame_sequence) ||
+    !nonNegativeSafeInteger(value.hand_count)
+  )
+    invalid("Invalid recognition metadata.");
+  const primary = value.primary_hand;
+  if (
+    primary !== null &&
+    (!record(primary) ||
+      !recognitionHands.has(primary.handedness as string) ||
+      !confidence(primary.confidence))
+  )
+    invalid("Invalid recognition primary hand.");
+  const candidate = value.candidate;
+  if (
+    candidate !== null &&
+    (!record(candidate) ||
+      !recognitionGesture(candidate.gesture_id) ||
+      !confidence(candidate.confidence) ||
+      typeof candidate.reason !== "string")
+  )
+    invalid("Invalid recognition candidate.");
+  const stable = value.stable;
+  if (
+    stable !== null &&
+    (!record(stable) ||
+      !recognitionGesture(stable.gesture_id) ||
+      !confidence(stable.confidence) ||
+      !nonNegativeSafeInteger(stable.confirmed_frames) ||
+      !finite(stable.since_ms) ||
+      stable.since_ms < 0)
+  )
+    invalid("Invalid stable recognition.");
+  const transition = value.transition;
+  if (transition === null) return;
+  if (
+    !record(transition) ||
+    !nonNegativeSafeInteger(transition.event_id) ||
+    transition.event_id < 1 ||
+    !transitionKinds.has(transition.kind as GestureTransitionKind) ||
+    !confidence(transition.confidence)
+  )
+    invalid("Invalid recognition transition.");
+  const previous = transition.previous_gesture;
+  const current = transition.gesture;
+  if (
+    transition.kind === "activated" &&
+    (previous !== null || !recognitionGesture(current))
+  )
+    invalid("Invalid activated transition.");
+  if (
+    transition.kind === "changed" &&
+    (!recognitionGesture(previous) || !recognitionGesture(current))
+  )
+    invalid("Invalid changed transition.");
+  if (
+    transition.kind === "released" &&
+    (!recognitionGesture(previous) || current !== null)
+  )
+    invalid("Invalid released transition.");
 }
 
 function validateGestureResult(
@@ -196,6 +285,13 @@ function validateGestureResult(
       scheduler.processing_time_ms < 0
     )
       invalid("Invalid scheduler metadata.");
+  }
+  if (value.recognition !== undefined && value.recognition !== null) {
+    try {
+      validateRecognition(value.recognition);
+    } catch {
+      return { ...value, recognition: null } as unknown as GestureResultMessage;
+    }
   }
   return value as unknown as GestureResultMessage;
 }

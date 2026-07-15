@@ -83,7 +83,10 @@ class AnnotationConsumerTests(SimpleTestCase):
     async def test_connection_ready_advertises_annotation_capability(self) -> None:
         c, p, ready = await connect(ResponseBridge())
         try:
-            self.assertEqual(ready["capabilities"], ["annotated_frame.jpeg.v1"])
+            self.assertEqual(
+                ready["capabilities"],
+                ["annotated_frame.jpeg.v1", "gesture.recognition.v1"],
+            )
             self.assertTrue(await c.receive_nothing(timeout=0.01))
             await c.disconnect()
         finally:

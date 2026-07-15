@@ -2,6 +2,8 @@ import { CameraController, CanvasFrameEncoder } from "./camera";
 import { websocketUrl } from "./config/environment";
 import "./dashboard/dashboard.css";
 import { DiagnosticDashboard } from "./dashboard";
+import { createRecognitionEventComposition } from "./application/application-composition";
+import { RecognitionStateStore } from "./recognition";
 import { GestureWebSocketClient } from "./websocket";
 import {
   AdaptiveQualityController,
@@ -18,6 +20,8 @@ const root = document.querySelector<HTMLElement>("#app");
 if (!root) throw new Error("The dashboard root element is missing.");
 
 const client = new GestureWebSocketClient(websocketUrl());
+const recognition = new RecognitionStateStore();
+const recognitionComposition = createRecognitionEventComposition(recognition);
 const camera = new CameraController();
 const encoder = new CanvasFrameEncoder();
 const stream = new FrameStreamController(camera, encoder, client);
@@ -44,12 +48,23 @@ const dashboard = new DiagnosticDashboard(root, client, {
   adaptive,
   adaptiveQuality,
   adaptiveResolution,
+  recognition,
   jpegQuality: encoder.jpegQuality,
   maximumFrameWidth: encoder.maximumWidth,
 });
 
+const recognitionUnsubscribe = client.subscribe(
+  recognitionComposition.handleSocketEvent,
+);
+const streamRecognitionUnsubscribe = stream.subscribe(
+  recognitionComposition.handleStreamEvent,
+);
+
 const shutdown = (): void => {
   dashboard.destroy();
+  recognitionUnsubscribe();
+  streamRecognitionUnsubscribe();
+  recognitionComposition.destroy();
   adaptive.destroy();
   adaptiveQuality.destroy();
   adaptiveResolution.destroy();

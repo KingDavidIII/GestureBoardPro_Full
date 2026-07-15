@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
 
 from asgiref.sync import sync_to_async
@@ -23,6 +24,8 @@ from gestureboard.services.websocket_runtime_bridge import (
 
 PROTOCOL_VERSION = 1
 MAXIMUM_REQUEST_ID_LENGTH = 128
+MAXIMUM_DISTINCT_FAILURE_TRACEBACKS = 3
+logger = logging.getLogger(__name__)
 
 
 class GestureConsumer(AsyncWebsocketConsumer):
@@ -34,6 +37,8 @@ class GestureConsumer(AsyncWebsocketConsumer):
     async def connect(self) -> None:
         self._bridge_closed = False
         self._connection_closed = False
+        self._failure_signatures: set[tuple[str, str]] = set()
+        self._failure_summary_logged = False
         self._outbound_lock = asyncio.Lock()
         try:
             self.bridge = await sync_to_async(
@@ -61,7 +66,7 @@ class GestureConsumer(AsyncWebsocketConsumer):
             {
                 "protocol_version": PROTOCOL_VERSION,
                 "type": WebSocketProtocolMessageType.CONNECTION_READY.value,
-                "capabilities": ["annotated_frame.jpeg.v1"],
+                "capabilities": ["annotated_frame.jpeg.v1", "gesture.recognition.v1"],
             }
         )
 
@@ -130,9 +135,9 @@ class GestureConsumer(AsyncWebsocketConsumer):
     async def _frame_failed(
         self, error: Exception, metrics: FrameSchedulerMetrics
     ) -> None:
-        del metrics
         if self._connection_closed:
             return
+        self._log_frame_failure(error, metrics)
         if isinstance(error, WebSocketRuntimeBridgeError):
             await self._send_error(error.code, error.public_message)
         else:
@@ -140,6 +145,61 @@ class GestureConsumer(AsyncWebsocketConsumer):
                 WebSocketProtocolErrorCode.INTERNAL_ERROR,
                 "An internal error occurred while processing the frame.",
             )
+
+    def _log_frame_failure(
+        self, error: Exception, metrics: FrameSchedulerMetrics
+    ) -> None:
+        signature = (type(error).__name__, str(error))
+        if signature in self._failure_signatures:
+            if not self._failure_summary_logged:
+                logger.warning(
+                    "Suppressing repeated frame-processing tracebacks for connection=%s after first occurrence.",
+                    getattr(self, "channel_name", "unknown"),
+                )
+                self._failure_summary_logged = True
+            return
+        if len(self._failure_signatures) >= MAXIMUM_DISTINCT_FAILURE_TRACEBACKS:
+            if not self._failure_summary_logged:
+                logger.warning(
+                    "Suppressing further distinct frame-processing tracebacks for connection=%s after %s signatures.",
+                    getattr(self, "channel_name", "unknown"),
+                    MAXIMUM_DISTINCT_FAILURE_TRACEBACKS,
+                )
+                self._failure_summary_logged = True
+            return
+        self._failure_signatures.add(signature)
+        context = self._failure_context(error, metrics)
+        try:
+            raise error
+        except Exception:
+            logger.exception("Frame processing failed: %s", context)
+
+    def _failure_context(
+        self, error: Exception, metrics: FrameSchedulerMetrics
+    ) -> dict[str, object]:
+        bridge = getattr(self, "bridge", None)
+        runtime = getattr(bridge, "runtime", None)
+        pipeline = getattr(runtime, "pipeline", None)
+        processor = getattr(pipeline, "processor", None)
+        task_engine = getattr(processor, "_task_engine", None)
+        result = getattr(processor, "last_mediapipe_result", None)
+        selection = getattr(result, "selection", None)
+        return {
+            "connection": getattr(self, "channel_name", "unknown"),
+            "frame_attempt": metrics.processed_frames,
+            "received_frames": metrics.received_frames,
+            "exception_type": type(error).__name__,
+            "bridge_stage": getattr(getattr(error, "stage", None), "value", None),
+            "bridge_code": getattr(getattr(error, "code", None), "value", None),
+            "recognition_engine": (
+                type(task_engine).__name__ if task_engine else "legacy_hands"
+            ),
+            "selected_task_hand": bool(getattr(selection, "primary_hand", None)),
+            "annotation_transport_enabled": bool(
+                getattr(bridge, "is_annotation_enabled", False)
+            ),
+            "landmark_overlay_renderer_active": bool(task_engine),
+        }
 
     async def _receive_control(self, text_data: str) -> None:
         try:

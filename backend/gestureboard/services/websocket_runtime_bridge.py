@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -10,6 +11,7 @@ from typing import Any, Protocol
 
 import cv2
 import numpy as np
+from gestureboard.recognition.service import RecognitionService, serialize_recognition
 
 from .annotated_frame_encoder import (
     ANNOTATED_FRAME_ENVELOPE_VERSION,
@@ -18,6 +20,8 @@ from .annotated_frame_encoder import (
 )
 from .gesture_engine import GestureObservation
 from .gesture_runtime import GestureRuntime, GestureRuntimeResult
+
+logger = logging.getLogger(__name__)
 
 
 class WebSocketRuntimeBridgeStage(StrEnum):
@@ -185,6 +189,7 @@ class WebSocketRuntimeBridge:
         decoder: FrameDecoder | None = None,
         config: WebSocketRuntimeBridgeConfig | None = None,
         annotated_frame_encoder: AnnotatedFrameEncoder | None = None,
+        recognition_service: RecognitionService | None = None,
     ) -> None:
         self.config = config or WebSocketRuntimeBridgeConfig()
         self.runtime = runtime if runtime is not None else GestureRuntime()
@@ -202,6 +207,7 @@ class WebSocketRuntimeBridge:
             annotated_frame_encoder or AnnotatedFrameEncoder()
         )
         self._owns_annotated_frame_encoder = annotated_frame_encoder is None
+        self.recognition_service = recognition_service or RecognitionService()
         self._annotation_enabled = False
         self._last_sequence: int | None = None
         self._closed = False
@@ -266,6 +272,26 @@ class WebSocketRuntimeBridge:
                 WebSocketProtocolErrorCode.INTERNAL_ERROR,
                 "Runtime result could not be serialised.",
             ) from error
+        try:
+            mediapipe_result = runtime_result.pipeline_result.mediapipe_result
+            result["recognition"] = (
+                dict(
+                    serialize_recognition(
+                        self.recognition_service.process(
+                            mediapipe_result,
+                            frame_sequence=next_sequence,
+                        )
+                    )
+                )
+                if mediapipe_result is not None
+                else None
+            )
+        except Exception:
+            # Recognition is optional telemetry: its failure cannot poison a frame.
+            logger.exception(
+                "Recognition metadata could not be produced for frame %s", next_sequence
+            )
+            result["recognition"] = None
         envelope: bytes | None = None
         annotation: dict[str, object] = {
             "enabled": self._annotation_enabled,
@@ -414,12 +440,14 @@ class WebSocketRuntimeBridge:
                 WebSocketProtocolErrorCode.RESET_FAILURE,
                 "Gesture runtime could not be reset.",
             ) from error
+        self.recognition_service.reset()
         self._last_sequence = None
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        self.recognition_service.reset()
         failures: list[Exception] = []
         for dependency, owned in (
             (self.runtime, self._owns_runtime),

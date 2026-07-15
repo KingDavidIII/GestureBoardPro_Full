@@ -70,6 +70,24 @@ Responses include `connection.ready`, `pong`, `runtime.reset.ack`,
 `gesture.result`, and typed `error` envelopes. Each connection owns an isolated
 runtime and temporal state.
 
+### Recognition metadata
+
+`connection.ready` advertises `gesture.recognition.v1`. A `gesture.result` may
+include a nullable `recognition` object (schema version 1). Recognition is
+deterministic, rule-based metadata for `open_palm`, `closed_fist`, `point`,
+`pinch`, or `unknown`; it is not sign-language recognition and does not produce
+keyboard or mouse input. It uses normalized geometry and one deterministic
+primary hand (detection confidence, handedness confidence, palm area, then
+source index). Rule precedence is pinch, point, fist, then open palm.
+
+The object contains only scalar hand, candidate, stable, and transition data;
+raw landmarks are never transmitted. Activation/change require confirmation,
+release requires the no-hand release window, and stream reset, disconnect,
+sequence regression, or a long gap clears its per-connection state. Recognition
+uses the same single MediaPipe result as annotation. A recognition-only failure
+returns `"recognition": null` while preserving the frame result, scheduler
+metadata, and optional annotated GBF1 feedback.
+
 ## Architecture and safety
 
 ```text
@@ -103,3 +121,11 @@ See [Sprint 1 architecture](docs/sprint1-architecture.md) and
   clients.
 - Camera capture and the incomplete frontend remain outside the WebSocket
   consumer.
+# Alpha 9.1 gesture recognition
+
+GestureBoard Pro uses the packaged MediaPipe Gesture Recognizer Task model for
+primary static-gesture recognition. The model is neither trained nor downloaded
+at runtime. `GESTURE_RECOGNIZER_MODEL_PATH` can supply an optional local model
+path; when Task initialisation fails, the deterministic rule classifier is used
+once as the startup fallback. Custom local gesture-model training and capture
+are not part of the supported Alpha 9 architecture.

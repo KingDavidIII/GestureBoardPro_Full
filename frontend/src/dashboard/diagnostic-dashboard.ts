@@ -5,6 +5,7 @@ import {
 } from "../camera";
 import type { AnnotatedFrameMessage, ServerMessage } from "../protocol";
 import type { SchedulerMetadata } from "../protocol/messages";
+import type { RecognitionState, RecognitionStateStore } from "../recognition";
 import {
   type AdaptiveQualityMode,
   type AdaptiveQualitySnapshot,
@@ -29,6 +30,7 @@ export interface ObjectUrlApi {
   revokeObjectURL(url: string): void;
 }
 export interface DiagnosticDashboardOptions {
+  readonly recognition?: RecognitionStateStore;
   readonly camera?: CameraController;
   readonly stream?: FrameStreamController;
   readonly jpegQuality?: number;
@@ -92,6 +94,9 @@ export class DiagnosticDashboard {
   private readonly unsubscribeAdaptive: (() => void) | null;
   private readonly unsubscribeQuality: (() => void) | null;
   private readonly unsubscribeResolution: (() => void) | null;
+  private readonly unsubscribeRecognition: (() => void) | null;
+  private readonly recognitionDiagnostics: HTMLDivElement;
+  private readonly recognitionLive: HTMLOutputElement;
   private cameraState: CameraState | null;
   private streamState: FrameStreamState | null;
   private supportsAnnotations = false;
@@ -122,6 +127,7 @@ export class DiagnosticDashboard {
       <section class="camera-panel" aria-labelledby="camera-title"><h2 id="camera-title">Camera capture</h2><video class="camera-preview" autoplay muted playsinline aria-label="Local camera preview"></video><output class="camera-status" aria-live="polite" aria-atomic="true"></output><div class="controls"><button type="button" data-action="start-camera" aria-label="Start camera">Start Camera</button><button type="button" data-action="stop-camera" aria-label="Stop camera">Stop Camera</button><button type="button" data-action="start-stream" aria-label="Start frame streaming">Start Streaming</button><button type="button" data-action="stop-stream" aria-label="Stop frame streaming">Stop Streaming</button></div></section>
       <section aria-labelledby="stream-diagnostics-title"><h2 id="stream-diagnostics-title">Streaming diagnostics</h2><output class="stream-status" aria-live="polite" aria-atomic="true"></output><div class="stream-diagnostics"></div></section>
       <section aria-labelledby="server-scheduling-title"><h2 id="server-scheduling-title">Server-side frame scheduling</h2><div class="server-scheduler-diagnostics"></div></section>
+      <section aria-labelledby="recognition-title"><h2 id="recognition-title">Gesture recognition</h2><div class="recognition-diagnostics"></div><output class="recognition-live" aria-live="polite" aria-atomic="true"></output></section>
       <section aria-labelledby="adaptive-stream-title"><h2 id="adaptive-stream-title">Adaptive stream control</h2><button type="button" data-action="adaptive-mode" aria-label="Switch adaptive stream mode"></button><output class="adaptive-stream-status" aria-live="polite" aria-atomic="true"></output><div class="adaptive-stream-diagnostics"></div></section>
       <section aria-labelledby="adaptive-quality-title"><h2 id="adaptive-quality-title">Adaptive JPEG quality</h2><button type="button" data-action="quality-mode" aria-label="Switch adaptive JPEG quality mode"></button><output class="adaptive-quality-status" aria-live="polite" aria-atomic="true"></output><div class="adaptive-quality-diagnostics"></div></section>
       <section aria-labelledby="adaptive-resolution-title"><h2 id="adaptive-resolution-title">Adaptive resolution</h2><button type="button" data-action="resolution-mode" aria-label="Switch adaptive resolution mode"></button><output class="adaptive-resolution-status" aria-live="polite" aria-atomic="true"></output><div class="adaptive-resolution-diagnostics"></div></section>
@@ -133,6 +139,8 @@ export class DiagnosticDashboard {
     this.streamStatus = this.element(".stream-status");
     this.diagnostics = this.element(".stream-diagnostics");
     this.serverDiagnostics = this.element(".server-scheduler-diagnostics");
+    this.recognitionDiagnostics = this.element(".recognition-diagnostics");
+    this.recognitionLive = this.element(".recognition-live");
     this.adaptiveDiagnostics = this.element(".adaptive-stream-diagnostics");
     this.adaptiveStatus = this.element(".adaptive-stream-status");
     this.adaptiveModeButton = this.element('[data-action="adaptive-mode"]');
@@ -214,6 +222,10 @@ export class DiagnosticDashboard {
         this.resolutionSnapshot = snapshot;
         this.renderResolution();
       }) ?? null;
+    this.unsubscribeRecognition =
+      this.options.recognition?.subscribe((snapshot) =>
+        this.renderRecognition(snapshot),
+      ) ?? null;
     if (this.options.camera) void this.options.camera.attachPreview(this.video);
     this.renderState(this.client.getState());
     this.renderCamera();
@@ -223,6 +235,16 @@ export class DiagnosticDashboard {
     this.renderQuality();
     this.renderResolution();
     this.renderAnnotation();
+    this.renderRecognition(
+      this.options.recognition?.getSnapshot() ?? {
+        availability: "unavailable",
+        capabilityAvailable: false,
+        epoch: 0,
+        recognition: null,
+        announcedEventId: null,
+        shouldAnnounce: false,
+      },
+    );
   }
 
   destroy(): void {
@@ -234,12 +256,37 @@ export class DiagnosticDashboard {
     this.unsubscribeAdaptive?.();
     this.unsubscribeQuality?.();
     this.unsubscribeResolution?.();
+    this.unsubscribeRecognition?.();
     this.options.adaptive?.reset();
     this.options.adaptiveQuality?.reset();
     this.options.adaptiveResolution?.reset();
     this.options.camera?.detachPreview();
     this.clearAnnotation();
     this.root.replaceChildren();
+  }
+  private renderRecognition(snapshot: RecognitionState): void {
+    const item = snapshot.recognition;
+    const dash = "—";
+    const label = (value: string | null | undefined): string =>
+      value
+        ? value
+            .replace(/_/g, " ")
+            .replace(/\b\w/g, (letter) => letter.toUpperCase())
+        : dash;
+    const percent = (value: number | undefined): string =>
+      value === undefined ? dash : `${(value * 100).toFixed(0)}%`;
+    this.recognitionDiagnostics.textContent = `Capability: ${snapshot.capabilityAvailable ? "Available" : "Unavailable"}; frame: ${item?.frame_sequence ?? dash}; hands: ${item?.hand_count ?? dash}; primary: ${label(item?.primary_hand?.handedness)} (${percent(item?.primary_hand?.confidence)}); candidate: ${label(item?.candidate?.gesture_id)} (${percent(item?.candidate?.confidence)}); reason: ${item?.candidate?.reason?.replace(/_/g, " ") ?? dash}; stable: ${label(item?.stable?.gesture_id)} (${percent(item?.stable?.confidence)}); confirmed: ${item?.stable?.confirmed_frames ?? dash}; duration: ${item?.stable?.since_ms ?? dash} ms; transition: ${label(item?.transition?.kind)}; previous: ${label(item?.transition?.previous_gesture)}; gesture: ${label(item?.transition?.gesture)}; event: ${item?.transition?.event_id ?? dash}.`;
+    if (!snapshot.shouldAnnounce || !item?.transition) {
+      if (!item) this.recognitionLive.textContent = "";
+      return;
+    }
+    const transition = item.transition;
+    this.recognitionLive.textContent =
+      transition.kind === "changed"
+        ? `${label(transition.previous_gesture)} changed to ${label(transition.gesture)}`
+        : transition.kind === "released"
+          ? `${label(transition.previous_gesture)} released`
+          : `${label(transition.gesture)} activated`;
   }
   private async connect(): Promise<void> {
     try {

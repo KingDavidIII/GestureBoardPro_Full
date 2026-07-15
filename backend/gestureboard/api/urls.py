@@ -1,5 +1,3 @@
-"""
-GestureBoard API URLs
-"""
+"""GestureBoard API URLs."""
 
 urlpatterns = []

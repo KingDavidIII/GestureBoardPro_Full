@@ -101,6 +101,17 @@ button:disabled {
   overflow-wrap: anywhere;
   color: #cbd5e1;
 }
+.recognition-capture-panel {
+  padding: 1.25rem;
+  border: 1px dashed #38bdf8;
+  border-radius: 0.75rem;
+  background: #0f1c32;
+}
+.capture-status,
+.capture-instruction {
+  display: block;
+  margin: 0.75rem 0;
+}
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
