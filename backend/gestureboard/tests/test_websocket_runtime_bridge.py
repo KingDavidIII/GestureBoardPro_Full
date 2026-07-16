@@ -612,8 +612,82 @@ class GestureMouseBridgeIntegrationTests(SimpleTestCase):
         self.assertEqual(output.closed, 1)
         self.assertNotIn("mouse", response)
 
+    def test_bridge_forwards_cached_hand_stable_id_and_timestamp_once(self) -> None:
+        coordinator = MagicMock()
+        bridge = self._bridge(coordinator)
+
+        response = bridge.process_frame(b"forwarded")
+
+        self.assertEqual(response["type"], "gesture.result")
+        coordinator.process.assert_called_once_with(
+            self.hand, timestamp_ms=123, stable_gesture=GestureId.POINT
+        )
+        self.assertEqual(self.decoder.payloads, [b"forwarded"])
+        self.runtime.process.assert_called_once_with(self.decoder.frame, timestamp=None)
+        self.recognition.process.assert_called_once_with(
+            self.runtime.process.return_value.pipeline_result.mediapipe_result,
+            frame_sequence=0,
+        )
+
+    def test_response_does_not_serialize_button_actions(self) -> None:
+        coordinator = MagicMock()
+        response = self._bridge(coordinator).process_frame(b"no-button-transport")
+
+        serialized = json.dumps(response)
+        for field in (
+            "button_decision",
+            "mouse_button",
+            "button_action",
+            "drag_action",
+        ):
+            with self.subTest(field=field):
+                self.assertNotIn(field, serialized)
+
+    def test_close_aggregates_owned_cleanup_and_preserves_first_cause(self) -> None:
+        runtime = MagicMock()
+        runtime.close.side_effect = RuntimeError("runtime close failure")
+        decoder = FakeDecoder()
+        decoder.close = MagicMock(side_effect=RuntimeError("decoder close failure"))
+        recognition = MagicMock()
+        recognition.reset.side_effect = RuntimeError("recognition reset failure")
+        coordinator = MagicMock()
+        coordinator.close.side_effect = RuntimeError("coordinator close failure")
+        encoder = MagicMock()
+        encoder.close.side_effect = RuntimeError("encoder close failure")
+        bridge = WebSocketRuntimeBridge(
+            runtime,
+            decoder,
+            recognition_service=recognition,
+            mouse_coordinator=coordinator,
+            annotated_frame_encoder=encoder,
+        )
+        bridge._owns_runtime = True
+        bridge._owns_decoder = True
+        bridge._owns_annotated_frame_encoder = True
+
+        with self.assertRaises(WebSocketRuntimeBridgeError) as raised:
+            bridge.close()
+        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
+        self.assertEqual(str(raised.exception.__cause__), "recognition reset failure")
+        coordinator.close.assert_called_once_with()
+        runtime.close.assert_called_once_with()
+        decoder.close.assert_called_once_with()
+        encoder.close.assert_called_once_with()
+        bridge.close()
+        coordinator.close.assert_called_once_with()
+
 
 class OpenCVDecoderIntegrationTests(SimpleTestCase):
+    def test_bridge_response_schema_has_no_button_action_fields(self) -> None:
+        response = {
+            "protocol_version": 1,
+            "type": "gesture.result",
+            "gesture": {"label": "unknown"},
+        }
+        self.assertFalse(
+            {"button_action", "button_decision", "mouse_button"} & response.keys()
+        )
+
     def test_real_png_decoding_reaches_fake_runtime_as_bgr(self) -> None:
         source = np.zeros((3, 4, 3), np.uint8)
         source[:, :, 2] = 255

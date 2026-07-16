@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 from unittest import TestCase
+from unittest.mock import patch
 
 from gestureboard.mouse import (
     GestureMouseRuntimeCoordinator,
     MouseLifecycleError,
     MouseOutputError,
+    MouseValidationError,
     WindowsCursorOwnershipLease,
 )
+from gestureboard.mouse.buttons import (
+    MouseButton,
+    MouseButtonActionKind,
+    MouseButtonIntent,
+    MouseButtonPolicy,
+)
+from gestureboard.recognition.models import GestureId
 from gestureboard.recognition.observations import (
     Handedness,
     HandObservation,
@@ -31,6 +40,35 @@ class RecordingOutput:
         self.closed += 1
 
 
+class RecordingButtonOutput:
+    def __init__(
+        self, *, fail_action: bool = False, fail_release: bool = False
+    ) -> None:
+        self.calls = []
+        self.release_calls = 0
+        self.closed = 0
+        self.fail_action = fail_action
+        self.fail_release = fail_release
+
+    def button_down(self, button: MouseButton) -> None:
+        if self.fail_action:
+            raise MouseOutputError("distinct button action failure")
+        self.calls.append((button, True))
+
+    def button_up(self, button: MouseButton) -> None:
+        if self.fail_action:
+            raise MouseOutputError("distinct button action failure")
+        self.calls.append((button, False))
+
+    def release_all(self) -> None:
+        self.release_calls += 1
+        if self.fail_release:
+            raise MouseOutputError("release cleanup failure")
+
+    def close(self) -> None:
+        self.closed += 1
+
+
 def hand(x: float = 0.25, y: float = 0.75, source: int = 0) -> HandSelection:
     points = [Landmark3D(0, 0, 0) for _ in range(21)]
     points[8] = Landmark3D(x, y, 0)
@@ -40,6 +78,238 @@ def hand(x: float = 0.25, y: float = 0.75, source: int = 0) -> HandSelection:
 
 
 class GestureMouseRuntimeCoordinatorTests(TestCase):
+    def test_disabled_buttons_have_no_decision_and_close_button_output(self) -> None:
+        buttons = RecordingButtonOutput()
+        coordinator = GestureMouseRuntimeCoordinator(
+            "buttons", enabled=True, button_output=buttons
+        )
+        result = coordinator.process(hand(), timestamp_ms=0)
+        self.assertIsNone(result.button_decision)
+        self.assertEqual(buttons.calls, [])
+        coordinator.close()
+        coordinator.close()
+        self.assertEqual(buttons.release_calls, 1)
+        self.assertEqual(buttons.closed, 1)
+
+    def test_stale_timestamp_is_rejected_before_output(self) -> None:
+        output = RecordingOutput()
+        coordinator = GestureMouseRuntimeCoordinator(
+            "timestamps", enabled=True, output=output
+        )
+        coordinator.process(hand(), timestamp_ms=10)
+        with self.assertRaises(MouseValidationError):
+            coordinator.process(hand(0.5), timestamp_ms=9)
+        self.assertEqual(len(output.targets), 1)
+
+    def test_non_point_stable_gesture_fails_closed_for_buttons(self) -> None:
+        buttons = RecordingButtonOutput()
+        coordinator = GestureMouseRuntimeCoordinator(
+            "stable",
+            enabled=True,
+            button_policy=MouseButtonPolicy(buttons_enabled=True),
+            button_output=buttons,
+        )
+        result = coordinator.process(
+            hand(), timestamp_ms=0, stable_gesture=GestureId.OPEN_PALM
+        )
+        self.assertIsNotNone(result.button_decision)
+        self.assertEqual(buttons.calls, [])
+
+    def test_primary_click_requires_dwell_and_confirmed_release(self) -> None:
+        policy = MouseButtonPolicy(buttons_enabled=True)
+        buttons = RecordingButtonOutput()
+        coordinator = GestureMouseRuntimeCoordinator(
+            "primary", enabled=True, button_policy=policy, button_output=buttons
+        )
+        with patch(
+            "gestureboard.mouse.runtime.detect_button_intent",
+            return_value=MouseButtonIntent.PRIMARY_CONTACT,
+        ):
+            coordinator.process(hand(), timestamp_ms=0, stable_gesture=GestureId.POINT)
+            coordinator.process(
+                hand(),
+                timestamp_ms=policy.intent_activation_ms - 1,
+                stable_gesture=GestureId.POINT,
+            )
+            coordinator.process(
+                hand(),
+                timestamp_ms=policy.intent_activation_ms,
+                stable_gesture=GestureId.POINT,
+            )
+        with patch(
+            "gestureboard.mouse.runtime.detect_button_intent",
+            return_value=MouseButtonIntent.NONE,
+        ):
+            coordinator.process(
+                hand(),
+                timestamp_ms=policy.intent_activation_ms + 1,
+                stable_gesture=GestureId.POINT,
+            )
+            result = coordinator.process(
+                hand(),
+                timestamp_ms=policy.intent_activation_ms + 1 + policy.intent_release_ms,
+                stable_gesture=GestureId.POINT,
+            )
+        self.assertEqual(
+            result.button_decision.action, MouseButtonActionKind.PRIMARY_CLICK
+        )
+        self.assertEqual(
+            buttons.calls, [(MouseButton.PRIMARY, True), (MouseButton.PRIMARY, False)]
+        )
+
+    def test_secondary_click_rearms_only_after_confirmed_none(self) -> None:
+        policy = MouseButtonPolicy(buttons_enabled=True)
+        buttons = RecordingButtonOutput()
+        coordinator = GestureMouseRuntimeCoordinator(
+            "secondary", enabled=True, button_policy=policy, button_output=buttons
+        )
+        with patch(
+            "gestureboard.mouse.runtime.detect_button_intent",
+            return_value=MouseButtonIntent.SECONDARY_CONTACT,
+        ):
+            coordinator.process(hand(), timestamp_ms=0, stable_gesture=GestureId.POINT)
+            coordinator.process(
+                hand(),
+                timestamp_ms=policy.intent_activation_ms,
+                stable_gesture=GestureId.POINT,
+            )
+            coordinator.process(
+                hand(),
+                timestamp_ms=policy.intent_activation_ms + 1,
+                stable_gesture=GestureId.POINT,
+            )
+        with patch(
+            "gestureboard.mouse.runtime.detect_button_intent",
+            return_value=MouseButtonIntent.NONE,
+        ):
+            coordinator.process(
+                hand(), timestamp_ms=1_000, stable_gesture=GestureId.POINT
+            )
+            coordinator.process(
+                hand(),
+                timestamp_ms=1_000 + policy.intent_release_ms,
+                stable_gesture=GestureId.POINT,
+            )
+        with patch(
+            "gestureboard.mouse.runtime.detect_button_intent",
+            return_value=MouseButtonIntent.SECONDARY_CONTACT,
+        ):
+            coordinator.process(
+                hand(), timestamp_ms=1_500, stable_gesture=GestureId.POINT
+            )
+            coordinator.process(
+                hand(),
+                timestamp_ms=1_500 + policy.intent_activation_ms,
+                stable_gesture=GestureId.POINT,
+            )
+        self.assertEqual(
+            buttons.calls,
+            [
+                (MouseButton.SECONDARY, True),
+                (MouseButton.SECONDARY, False),
+                (MouseButton.SECONDARY, True),
+                (MouseButton.SECONDARY, False),
+            ],
+        )
+
+    def test_drag_moves_cursor_and_non_point_releases_once(self) -> None:
+        policy = MouseButtonPolicy(buttons_enabled=True, drag_enabled=True)
+        buttons = RecordingButtonOutput()
+        output = RecordingOutput()
+        coordinator = GestureMouseRuntimeCoordinator(
+            "drag",
+            enabled=True,
+            button_policy=policy,
+            button_output=buttons,
+            output=output,
+        )
+        with patch(
+            "gestureboard.mouse.runtime.detect_button_intent",
+            return_value=MouseButtonIntent.PRIMARY_CONTACT,
+        ):
+            coordinator.process(hand(), timestamp_ms=0, stable_gesture=GestureId.POINT)
+            coordinator.process(
+                hand(0.3),
+                timestamp_ms=policy.drag_hold_ms,
+                stable_gesture=GestureId.POINT,
+            )
+            coordinator.process(
+                hand(0.4),
+                timestamp_ms=policy.drag_hold_ms + 1,
+                stable_gesture=GestureId.POINT,
+            )
+        for timestamp, gesture in enumerate(
+            (None, GestureId.OPEN_PALM, GestureId.CLOSED_FIST), start=1_000
+        ):
+            coordinator.process(hand(), timestamp_ms=timestamp, stable_gesture=gesture)
+        self.assertEqual(
+            buttons.calls, [(MouseButton.PRIMARY, True), (MouseButton.PRIMARY, False)]
+        )
+        self.assertGreaterEqual(len(output.targets), 3)
+
+    def test_button_action_error_preserves_original_and_attempts_release(self) -> None:
+        policy = MouseButtonPolicy(buttons_enabled=True, drag_enabled=True)
+        buttons = RecordingButtonOutput(fail_action=True, fail_release=True)
+        coordinator = GestureMouseRuntimeCoordinator(
+            "button-error", enabled=True, button_policy=policy, button_output=buttons
+        )
+        with patch(
+            "gestureboard.mouse.runtime.detect_button_intent",
+            return_value=MouseButtonIntent.PRIMARY_CONTACT,
+        ):
+            coordinator.process(hand(), timestamp_ms=0, stable_gesture=GestureId.POINT)
+            with self.assertRaisesRegex(
+                MouseOutputError, "distinct button action failure"
+            ):
+                coordinator.process(
+                    hand(),
+                    timestamp_ms=policy.drag_hold_ms,
+                    stable_gesture=GestureId.POINT,
+                )
+        self.assertEqual(buttons.release_calls, 1)
+
+    def test_cursor_error_preserves_original_and_releases_ownership(self) -> None:
+        lease = WindowsCursorOwnershipLease()
+        coordinator = GestureMouseRuntimeCoordinator(
+            "cursor-error",
+            enabled=True,
+            output=RecordingOutput(fail=True),
+            windows_lease=lease,
+        )
+        with self.assertRaisesRegex(MouseOutputError, "failed"):
+            coordinator.process(hand(), timestamp_ms=3)
+        self.assertFalse(coordinator.enabled)
+        self.assertIsNone(lease.owner_id)
+
+    def test_lifecycle_aggregation_attempts_later_cleanup_and_rejects_stale_time(
+        self,
+    ) -> None:
+        lease = WindowsCursorOwnershipLease()
+        buttons = RecordingButtonOutput(fail_release=True)
+        coordinator = GestureMouseRuntimeCoordinator(
+            "cleanup", enabled=True, button_output=buttons, windows_lease=lease
+        )
+        coordinator.process(hand(), timestamp_ms=10)
+        with self.assertRaisesRegex(MouseOutputError, "release cleanup failure"):
+            coordinator.tracking_lost(timestamp_ms=10)
+        self.assertEqual(buttons.release_calls, 1)
+        self.assertIsNone(lease.owner_id)
+        with self.assertRaises(MouseValidationError):
+            coordinator.emergency_stop(timestamp_ms=9)
+
+    def test_close_aggregates_disabled_button_cleanup_once(self) -> None:
+        buttons = RecordingButtonOutput(fail_release=True)
+        output = RecordingOutput()
+        coordinator = GestureMouseRuntimeCoordinator(
+            "close", output=output, button_output=buttons
+        )
+        with self.assertRaisesRegex(MouseOutputError, "release cleanup failure"):
+            coordinator.close()
+        coordinator.close()
+        self.assertEqual(buttons.release_calls, 1)
+        self.assertEqual(buttons.closed, 1)
+        self.assertEqual(output.closed, 1)
+
     def test_disabled_default_never_maps_or_outputs(self) -> None:
         output = RecordingOutput()
         coordinator = GestureMouseRuntimeCoordinator("a", output=output)

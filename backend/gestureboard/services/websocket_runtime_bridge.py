@@ -499,16 +499,19 @@ class WebSocketRuntimeBridge:
                 "Gesture runtime could not be reset.",
             ) from error
         self.recognition_service.reset()
-        self.mouse_coordinator.tracking_lost(timestamp_ms=0)
+        self.mouse_coordinator.tracking_lost()
         self._last_sequence = None
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        self.recognition_service.reset()
-        self.mouse_coordinator.close()
         failures: list[Exception] = []
+        for operation in (self.recognition_service.reset, self.mouse_coordinator.close):
+            try:
+                operation()
+            except Exception as error:
+                failures.append(error)
         for dependency, owned in (
             (self.runtime, self._owns_runtime),
             (self.decoder, self._owns_decoder),
@@ -532,6 +535,7 @@ class WebSocketRuntimeBridge:
 
         timestamp_ms = 0
         selected = None
+        stable = None
         if recognition_result is not None:
             timestamp = getattr(recognition_result, "timestamp_ms", 0)
             if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
@@ -541,13 +545,17 @@ class WebSocketRuntimeBridge:
             if getattr(stable, "gesture_id", None) is not GestureId.POINT:
                 selected = None
         try:
-            self.mouse_coordinator.process(selected, timestamp_ms=timestamp_ms)
+            self.mouse_coordinator.process(
+                selected,
+                timestamp_ms=timestamp_ms,
+                stable_gesture=getattr(stable, "gesture_id", None),
+            )
         except MouseOutputError:
             logger.warning("Gesture mouse output failed for frame %s", sequence)
 
     def _reset_mouse_safely(self) -> None:
         try:
-            self.mouse_coordinator.tracking_lost(timestamp_ms=0)
+            self.mouse_coordinator.tracking_lost()
         except Exception:
             logger.warning("Gesture mouse tracking reset failed.")
 

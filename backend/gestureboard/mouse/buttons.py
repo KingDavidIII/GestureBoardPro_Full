@@ -335,7 +335,6 @@ class MouseButtonController:
             return self._decision(None, timestamp_ms)
         if self._state is MouseButtonState.DRAGGING:
             return self._force_release_drag(timestamp_ms)
-        was_dragging = False
         was_secondary_latched = self._state is MouseButtonState.SECONDARY_LATCHED
         (
             self._state,
@@ -353,15 +352,9 @@ class MouseButtonController:
             None,
         )
         self._last_timestamps.clear()
-        self._requires_release = (
-            self._requires_release or was_dragging or was_secondary_latched
-        )
+        self._requires_release = self._requires_release or was_secondary_latched
         self._suppressed_release_started = None
-        if was_dragging:
-            self._cooldown_until = timestamp_ms + self.policy.click_cooldown_ms
-        return self._decision(
-            MouseButtonActionKind.PRIMARY_UP if was_dragging else None, timestamp_ms
-        )
+        return self._decision(None, timestamp_ms)
 
     def _force_release_drag(self, timestamp_ms: int) -> MouseButtonDecision:
         if self._state is not MouseButtonState.DRAGGING:
