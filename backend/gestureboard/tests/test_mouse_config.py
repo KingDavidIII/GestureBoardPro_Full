@@ -8,6 +8,8 @@ from gestureboard.mouse import (
     GestureMouseRuntimeConfig,
     load_gesture_mouse_config,
 )
+from gestureboard.mouse.buttons import MouseButtonPolicy
+from gestureboard.mouse.models import MouseValidationError
 
 
 class GestureMouseConfigTests(TestCase):
@@ -19,6 +21,9 @@ class GestureMouseConfigTests(TestCase):
         self.assertEqual(
             (config.virtual_width_px, config.virtual_height_px), (1920, 1080)
         )
+        self.assertEqual(config.button_policy, MouseButtonPolicy())
+        self.assertFalse(config.button_policy.buttons_enabled)
+        self.assertFalse(config.button_policy.drag_enabled)
 
     def test_all_environment_overrides_are_parsed(self) -> None:
         config = load_gesture_mouse_config(
@@ -36,6 +41,15 @@ class GestureMouseConfigTests(TestCase):
                 "GESTURE_MOUSE_ACTIVE_RIGHT": "0.9",
                 "GESTURE_MOUSE_ACTIVE_BOTTOM": "0.8",
                 "GESTURE_MOUSE_MAX_OUTPUT_HZ": "120",
+                "GESTURE_MOUSE_BUTTONS_ENABLED": "true",
+                "GESTURE_MOUSE_DRAG_ENABLED": "on",
+                "GESTURE_MOUSE_BUTTON_INTENT_ACTIVATION_MS": "1",
+                "GESTURE_MOUSE_BUTTON_INTENT_RELEASE_MS": "2",
+                "GESTURE_MOUSE_CLICK_COOLDOWN_MS": "3",
+                "GESTURE_MOUSE_DRAG_HOLD_MS": "4",
+                "GESTURE_MOUSE_CONTACT_ACTIVATION_THRESHOLD": "0",
+                "GESTURE_MOUSE_CONTACT_RELEASE_THRESHOLD": "1",
+                "GESTURE_MOUSE_CONTACT_ISOLATION_RATIO": "1",
             }
         )
         self.assertTrue(config.enabled)
@@ -43,6 +57,9 @@ class GestureMouseConfigTests(TestCase):
         self.assertEqual(config.virtual_surface().width_px, 800)
         self.assertEqual(config.mapping_policy().smoothing_alpha, 0.5)
         self.assertEqual(config.max_output_hz, 120.0)
+        self.assertEqual(config.button_policy.intent_activation_ms, 1)
+        self.assertEqual(config.button_policy.drag_hold_ms, 4)
+        self.assertTrue(config.button_policy.buttons_enabled)
 
     def test_blank_values_use_defaults(self) -> None:
         self.assertEqual(
@@ -61,6 +78,16 @@ class GestureMouseConfigTests(TestCase):
             {"GESTURE_MOUSE_ACTIVE_LEFT": "1", "GESTURE_MOUSE_ACTIVE_RIGHT": "1"},
             {"GESTURE_MOUSE_MAX_OUTPUT_HZ": "0"},
             {"GESTURE_MOUSE_MAX_OUTPUT_HZ": "241"},
+            {"GESTURE_MOUSE_BUTTONS_ENABLED": "perhaps"},
+            {"GESTURE_MOUSE_BUTTON_INTENT_ACTIVATION_MS": "nope"},
+            {"GESTURE_MOUSE_BUTTON_INTENT_RELEASE_MS": "0"},
+            {"GESTURE_MOUSE_CLICK_COOLDOWN_MS": "-1"},
+            {"GESTURE_MOUSE_DRAG_HOLD_MS": "10001"},
+            {"GESTURE_MOUSE_CONTACT_ACTIVATION_THRESHOLD": "NaN"},
+            {"GESTURE_MOUSE_CONTACT_RELEASE_THRESHOLD": "Infinity"},
+            {"GESTURE_MOUSE_CONTACT_ISOLATION_RATIO": "-Infinity"},
+            {"GESTURE_MOUSE_CONTACT_RELEASE_THRESHOLD": "0.20"},
+            {"GESTURE_MOUSE_CONTACT_ISOLATION_RATIO": "0"},
         )
         for values in invalid:
             with (
@@ -81,3 +108,13 @@ class GestureMouseConfigTests(TestCase):
                 self.assertRaises(GestureMouseConfigurationError),
             ):
                 GestureMouseRuntimeConfig(**kwargs)
+
+    def test_button_policy_rejects_invalid_constructor_values(self) -> None:
+        for kwargs in (
+            {"intent_activation_ms": 0},
+            {"buttons_enabled": 1},
+            {"contact_release_threshold": 0.20},
+            {"drag_hold_ms": 119},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(MouseValidationError):
+                MouseButtonPolicy(**kwargs)
