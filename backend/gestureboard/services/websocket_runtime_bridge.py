@@ -11,6 +11,23 @@ from typing import Any, Protocol
 
 import cv2
 import numpy as np
+from gestureboard.mouse.config import (
+    GestureMouseOutputMode,
+    GestureMouseRuntimeConfig,
+    load_gesture_mouse_config,
+)
+from gestureboard.mouse.mapping import VirtualCursorMapper
+from gestureboard.mouse.models import MouseOutputError
+from gestureboard.mouse.output import (
+    NullVirtualCursorOutput,
+    WindowsCursorApi,
+    WindowsCursorOutput,
+    WindowsDesktopBounds,
+    create_windows_cursor_api,
+)
+from gestureboard.mouse.ownership import WindowsCursorOwnershipLease
+from gestureboard.mouse.runtime import GestureMouseRuntimeCoordinator
+from gestureboard.recognition.models import GestureId
 from gestureboard.recognition.service import RecognitionService, serialize_recognition
 
 from .annotated_frame_encoder import (
@@ -22,6 +39,8 @@ from .gesture_engine import GestureObservation
 from .gesture_runtime import GestureRuntime, GestureRuntimeResult
 
 logger = logging.getLogger(__name__)
+
+_windows_mouse_lease = WindowsCursorOwnershipLease()
 
 
 class WebSocketRuntimeBridgeStage(StrEnum):
@@ -190,6 +209,10 @@ class WebSocketRuntimeBridge:
         config: WebSocketRuntimeBridgeConfig | None = None,
         annotated_frame_encoder: AnnotatedFrameEncoder | None = None,
         recognition_service: RecognitionService | None = None,
+        mouse_config: GestureMouseRuntimeConfig | None = None,
+        mouse_coordinator: GestureMouseRuntimeCoordinator | None = None,
+        mouse_windows_api: WindowsCursorApi | None = None,
+        mouse_ownership_lease: WindowsCursorOwnershipLease | None = None,
     ) -> None:
         self.config = config or WebSocketRuntimeBridgeConfig()
         self.runtime = runtime if runtime is not None else GestureRuntime()
@@ -208,9 +231,38 @@ class WebSocketRuntimeBridge:
         )
         self._owns_annotated_frame_encoder = annotated_frame_encoder is None
         self.recognition_service = recognition_service or RecognitionService()
+        self.mouse_config = mouse_config or load_gesture_mouse_config()
+        self.mouse_coordinator = mouse_coordinator or self._create_mouse_coordinator(
+            mouse_windows_api=mouse_windows_api,
+            mouse_ownership_lease=mouse_ownership_lease,
+        )
         self._annotation_enabled = False
         self._last_sequence: int | None = None
         self._closed = False
+
+    def _create_mouse_coordinator(
+        self,
+        *,
+        mouse_windows_api: WindowsCursorApi | None,
+        mouse_ownership_lease: WindowsCursorOwnershipLease | None,
+    ) -> GestureMouseRuntimeCoordinator:
+        config = self.mouse_config
+        mapper = VirtualCursorMapper(config.virtual_surface(), config.mapping_policy())
+        output = NullVirtualCursorOutput()
+        lease = None
+        if config.enabled and config.output_mode is GestureMouseOutputMode.WINDOWS:
+            api = mouse_windows_api or create_windows_cursor_api()
+            bounds = WindowsDesktopBounds.from_windows_api(api)
+            output = WindowsCursorOutput(bounds, api)
+            lease = mouse_ownership_lease or _windows_mouse_lease
+        return GestureMouseRuntimeCoordinator(
+            f"bridge-{id(self)}",
+            enabled=config.enabled,
+            mapper=mapper,
+            output=output,
+            max_output_hz=config.max_output_hz,
+            windows_lease=lease,
+        )
 
     def process_frame(
         self,
@@ -237,8 +289,10 @@ class WebSocketRuntimeBridge:
         try:
             frame = self.decoder.decode(payload)
         except WebSocketRuntimeBridgeError:
+            self._reset_mouse_safely()
             raise
         except Exception as error:
+            self._reset_mouse_safely()
             raise WebSocketRuntimeBridgeError(
                 WebSocketRuntimeBridgeStage.FRAME_DECODING,
                 WebSocketProtocolErrorCode.INVALID_FRAME,
@@ -253,6 +307,7 @@ class WebSocketRuntimeBridge:
         try:
             runtime_result = self.runtime.process(frame, timestamp=timestamp)
         except Exception as error:
+            self._reset_mouse_safely()
             message = "Gesture runtime could not process the frame."
             if self.config.expose_diagnostic_errors:
                 message = f"{message} {str(error)}"
@@ -272,18 +327,20 @@ class WebSocketRuntimeBridge:
                 WebSocketProtocolErrorCode.INTERNAL_ERROR,
                 "Runtime result could not be serialised.",
             ) from error
+        recognition_result = None
         try:
             mediapipe_result = runtime_result.pipeline_result.mediapipe_result
-            result["recognition"] = (
-                dict(
-                    serialize_recognition(
-                        self.recognition_service.process(
-                            mediapipe_result,
-                            frame_sequence=next_sequence,
-                        )
-                    )
+            recognition_result = (
+                self.recognition_service.process(
+                    mediapipe_result,
+                    frame_sequence=next_sequence,
                 )
                 if mediapipe_result is not None
+                else None
+            )
+            result["recognition"] = (
+                dict(serialize_recognition(recognition_result))
+                if recognition_result is not None
                 else None
             )
         except Exception:
@@ -292,6 +349,7 @@ class WebSocketRuntimeBridge:
                 "Recognition metadata could not be produced for frame %s", next_sequence
             )
             result["recognition"] = None
+        self._process_mouse(recognition_result, next_sequence)
         envelope: bytes | None = None
         annotation: dict[str, object] = {
             "enabled": self._annotation_enabled,
@@ -441,6 +499,7 @@ class WebSocketRuntimeBridge:
                 "Gesture runtime could not be reset.",
             ) from error
         self.recognition_service.reset()
+        self.mouse_coordinator.tracking_lost(timestamp_ms=0)
         self._last_sequence = None
 
     def close(self) -> None:
@@ -448,6 +507,7 @@ class WebSocketRuntimeBridge:
             return
         self._closed = True
         self.recognition_service.reset()
+        self.mouse_coordinator.close()
         failures: list[Exception] = []
         for dependency, owned in (
             (self.runtime, self._owns_runtime),
@@ -466,6 +526,30 @@ class WebSocketRuntimeBridge:
                 WebSocketProtocolErrorCode.INTERNAL_ERROR,
                 "One or more owned bridge dependencies could not be closed.",
             ) from failures[0]
+
+    def _process_mouse(self, recognition_result: object, sequence: int) -> None:
+        """Move only for a stabilized point from the cached selected hand."""
+
+        timestamp_ms = 0
+        selected = None
+        if recognition_result is not None:
+            timestamp = getattr(recognition_result, "timestamp_ms", 0)
+            if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
+                timestamp_ms = max(0, int(timestamp))
+            selected = getattr(recognition_result, "primary_hand", None)
+            stable = getattr(recognition_result, "stable", None)
+            if getattr(stable, "gesture_id", None) is not GestureId.POINT:
+                selected = None
+        try:
+            self.mouse_coordinator.process(selected, timestamp_ms=timestamp_ms)
+        except MouseOutputError:
+            logger.warning("Gesture mouse output failed for frame %s", sequence)
+
+    def _reset_mouse_safely(self) -> None:
+        try:
+            self.mouse_coordinator.tracking_lost(timestamp_ms=0)
+        except Exception:
+            logger.warning("Gesture mouse tracking reset failed.")
 
     def _ensure_open(self, operation: str) -> None:
         if self._closed:

@@ -9,6 +9,17 @@ import cv2
 import numpy as np
 from django.test import SimpleTestCase
 
+from gestureboard.mouse.config import GestureMouseOutputMode, GestureMouseRuntimeConfig
+from gestureboard.mouse.mapping import VirtualCursorMapper, VirtualSurface
+from gestureboard.mouse.ownership import WindowsCursorOwnershipLease
+from gestureboard.mouse.runtime import GestureMouseRuntimeCoordinator
+from gestureboard.recognition.models import GestureCandidate, GestureId
+from gestureboard.recognition.observations import (
+    Handedness,
+    HandObservation,
+    Landmark3D,
+)
+from gestureboard.recognition.service import RecognitionFrameResult
 from gestureboard.services.annotated_frame_encoder import AnnotatedFrameEncodingResult
 from gestureboard.services.gesture_classifier import (
     FingerState,
@@ -95,6 +106,58 @@ class FakeDecoder:
         self.close_count += 1
 
 
+class RecordingCursorOutput:
+    def __init__(self, *, fails: bool = False) -> None:
+        self.targets: list[object] = []
+        self.closed = 0
+        self.fails = fails
+
+    def move(self, target: object) -> None:
+        if self.fails:
+            from gestureboard.mouse.models import MouseOutputError
+
+            raise MouseOutputError("fixture output failed")
+        self.targets.append(target)
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+class FakeWindowsCursorApi:
+    def __init__(self) -> None:
+        self.metric_calls: list[int] = []
+        self.moves: list[tuple[int, int]] = []
+
+    def get_system_metrics(self, metric_id: int) -> int:
+        self.metric_calls.append(metric_id)
+        return (10, 20, 100, 50)[len(self.metric_calls) - 1]
+
+    def set_cursor_pos(self, x: int, y: int) -> bool:
+        self.moves.append((x, y))
+        return True
+
+
+def recognition_hand(*, source_index: int = 2) -> HandObservation:
+    landmarks = [Landmark3D(0.0, 0.0, 0.0) for _ in range(21)]
+    landmarks[8] = Landmark3D(0.25, 0.75, 0.0)
+    return HandObservation(
+        tuple(landmarks), source_index, Handedness.RIGHT, 0.9, None, 1.0, 1.0
+    )
+
+
+def recognition_result(
+    hand: HandObservation | None,
+    stable: GestureCandidate | None = None,
+) -> RecognitionFrameResult:
+    return RecognitionFrameResult(
+        1, 0, 0 if hand is None else 1, hand, None, stable, None, None, 0, 123.0
+    )
+
+
+def stable(gesture_id: GestureId) -> GestureCandidate:
+    return GestureCandidate(gesture_id, 0.9, "fixture", threshold_satisfied=True)
+
+
 class BridgeConfigTests(SimpleTestCase):
     def test_default_configuration_is_valid_and_immutable(self) -> None:
         config = WebSocketRuntimeBridgeConfig()
@@ -122,7 +185,18 @@ class BridgeConfigTests(SimpleTestCase):
 class BridgeProcessingTests(SimpleTestCase):
     def setUp(self) -> None:
         self.runtime = MagicMock()
-        self.runtime.process.return_value = runtime_result()
+        original = runtime_result()
+        pipeline = GesturePipelineResult(
+            original.annotated_frame, original.pipeline_result.hands, object()
+        )
+        self.runtime.process.return_value = GestureRuntimeResult(
+            pipeline,
+            original.selected_hand,
+            original.selected_identity,
+            original.selection_decision,
+            original.observation,
+            original.engine_result,
+        )
         self.decoder = FakeDecoder()
         self.bridge = WebSocketRuntimeBridge(self.runtime, self.decoder)
 
@@ -371,6 +445,172 @@ class BridgeLifecycleTests(SimpleTestCase):
             bridge.close()
         runtime.close.assert_called_once_with()
         self.assertEqual(decoder.close_count, 1)
+
+
+class GestureMouseBridgeIntegrationTests(SimpleTestCase):
+    def setUp(self) -> None:
+        self.runtime = MagicMock()
+        original = runtime_result()
+        pipeline = GesturePipelineResult(
+            original.annotated_frame, original.pipeline_result.hands, object()
+        )
+        self.runtime.process.return_value = GestureRuntimeResult(
+            pipeline,
+            original.selected_hand,
+            original.selected_identity,
+            original.selection_decision,
+            original.observation,
+            original.engine_result,
+        )
+        self.decoder = FakeDecoder()
+        self.recognition = MagicMock()
+        self.hand = recognition_hand()
+        self.recognition.process.return_value = recognition_result(
+            self.hand, stable(GestureId.POINT)
+        )
+
+    def _bridge(
+        self,
+        coordinator: GestureMouseRuntimeCoordinator,
+        config: GestureMouseRuntimeConfig | None = None,
+    ) -> WebSocketRuntimeBridge:
+        return WebSocketRuntimeBridge(
+            self.runtime,
+            self.decoder,
+            recognition_service=self.recognition,
+            mouse_config=config or GestureMouseRuntimeConfig(enabled=True),
+            mouse_coordinator=coordinator,
+        )
+
+    def test_default_disabled_does_not_construct_windows_output_or_move(self) -> None:
+        output = RecordingCursorOutput()
+        coordinator = GestureMouseRuntimeCoordinator("disabled", output=output)
+        with patch(
+            "gestureboard.services.websocket_runtime_bridge.create_windows_cursor_api"
+        ) as api_factory:
+            response = self._bridge(
+                coordinator, GestureMouseRuntimeConfig()
+            ).process_frame(b"frame")
+        self.assertEqual(response["type"], "gesture.result")
+        self.assertEqual(output.targets, [])
+        api_factory.assert_not_called()
+
+    def test_virtual_mode_reuses_cached_primary_hand_once(self) -> None:
+        output = RecordingCursorOutput()
+        coordinator = GestureMouseRuntimeCoordinator(
+            "virtual",
+            enabled=True,
+            mapper=VirtualCursorMapper(VirtualSurface(100, 100)),
+            output=output,
+        )
+        bridge = self._bridge(coordinator)
+
+        response = bridge.process_frame(b"frame")
+
+        self.assertEqual(response["protocol_version"], 1)
+        self.assertEqual(len(output.targets), 1)
+        self.assertEqual(output.targets[0].source_index, self.hand.source_index)
+        self.assertEqual(output.targets[0].timestamp_ms, 123)
+        self.recognition.process.assert_called_once_with(
+            self.runtime.process.return_value.pipeline_result.mediapipe_result,
+            frame_sequence=0,
+        )
+        self.runtime.process.assert_called_once_with(self.decoder.frame, timestamp=None)
+
+    def test_no_hand_and_processing_failure_reset_mouse_without_movement(self) -> None:
+        output = RecordingCursorOutput()
+        coordinator = GestureMouseRuntimeCoordinator(
+            "virtual", enabled=True, output=output
+        )
+        bridge = self._bridge(coordinator)
+        self.recognition.process.return_value = recognition_result(None)
+        bridge.process_frame(b"no-hand")
+        self.assertEqual(output.targets, [])
+        self.runtime.process.side_effect = ValueError("runtime failure")
+        with self.assertRaises(WebSocketRuntimeBridgeError):
+            bridge.process_frame(b"bad")
+        self.assertEqual(output.targets, [])
+
+    def test_only_stable_point_allows_motion_and_reacquires_fresh_mapping(self) -> None:
+        output = RecordingCursorOutput()
+        coordinator = GestureMouseRuntimeCoordinator(
+            "virtual",
+            enabled=True,
+            mapper=VirtualCursorMapper(VirtualSurface(100, 100)),
+            output=output,
+            max_output_hz=10,
+        )
+        bridge = self._bridge(coordinator)
+        bridge.process_frame(b"point")
+        self.assertEqual(len(output.targets), 1)
+        for gesture_id in (
+            GestureId.OPEN_PALM,
+            GestureId.CLOSED_FIST,
+            GestureId.PINCH,
+            GestureId.UNKNOWN,
+        ):
+            with self.subTest(gesture_id=gesture_id):
+                self.recognition.process.return_value = recognition_result(
+                    self.hand, stable(gesture_id)
+                )
+                bridge.process_frame(b"non-point")
+                self.assertEqual(len(output.targets), 1)
+        self.recognition.process.return_value = recognition_result(self.hand)
+        bridge.process_frame(b"pending")
+        self.assertEqual(len(output.targets), 1)
+        self.recognition.process.return_value = recognition_result(
+            self.hand, stable(GestureId.POINT)
+        )
+        bridge.process_frame(b"point-again")
+        self.assertEqual(len(output.targets), 2)
+        self.assertEqual(output.targets[-1].timestamp_ms, 123)
+
+    def test_output_failure_isolated_from_gesture_result_and_releases_lease(
+        self,
+    ) -> None:
+        lease = WindowsCursorOwnershipLease()
+        coordinator = GestureMouseRuntimeCoordinator(
+            "windows",
+            enabled=True,
+            output=RecordingCursorOutput(fails=True),
+            windows_lease=lease,
+        )
+        response = self._bridge(coordinator).process_frame(b"frame")
+        self.assertEqual(response["type"], "gesture.result")
+        self.assertFalse(coordinator.enabled)
+        self.assertIsNone(lease.owner_id)
+
+    def test_windows_mode_uses_fake_api_and_requires_the_shared_lease(self) -> None:
+        api = FakeWindowsCursorApi()
+        lease = WindowsCursorOwnershipLease()
+        bridge = WebSocketRuntimeBridge(
+            self.runtime,
+            self.decoder,
+            recognition_service=self.recognition,
+            mouse_config=GestureMouseRuntimeConfig(
+                enabled=True, output_mode=GestureMouseOutputMode.WINDOWS
+            ),
+            mouse_windows_api=api,
+            mouse_ownership_lease=lease,
+        )
+        response = bridge.process_frame(b"frame")
+        self.assertEqual(response["type"], "gesture.result")
+        self.assertEqual(api.moves, [(109, 69)])
+        self.assertIsNotNone(lease.owner_id)
+        bridge.close()
+        self.assertIsNone(lease.owner_id)
+
+    def test_close_releases_output_and_bridge_does_not_add_protocol_data(self) -> None:
+        output = RecordingCursorOutput()
+        coordinator = GestureMouseRuntimeCoordinator(
+            "virtual", enabled=True, output=output
+        )
+        bridge = self._bridge(coordinator)
+        response = bridge.process_frame(b"frame")
+        bridge.close()
+        bridge.close()
+        self.assertEqual(output.closed, 1)
+        self.assertNotIn("mouse", response)
 
 
 class OpenCVDecoderIntegrationTests(SimpleTestCase):
