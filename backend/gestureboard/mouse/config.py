@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from math import isfinite
 
+from .buttons import MouseButtonPolicy
 from .mapping import ActiveCameraRegion, VirtualCursorMappingPolicy, VirtualSurface
 from .models import MouseValidationError
 
@@ -33,12 +34,17 @@ class GestureMouseRuntimeConfig:
     smoothing_alpha: float = 1.0
     dead_zone_radius: float = 0.0
     max_output_hz: float = 60.0
+    button_policy: MouseButtonPolicy = field(default_factory=MouseButtonPolicy)
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise GestureMouseConfigurationError("enabled must be bool.")
         if not isinstance(self.output_mode, GestureMouseOutputMode):
             raise GestureMouseConfigurationError("output_mode must be supported.")
+        if not isinstance(self.button_policy, MouseButtonPolicy):
+            raise GestureMouseConfigurationError(
+                "button_policy must be a MouseButtonPolicy."
+            )
         try:
             VirtualSurface(self.virtual_width_px, self.virtual_height_px)
             VirtualCursorMappingPolicy(
@@ -109,6 +115,53 @@ def load_gesture_mouse_config(
             ),
             max_output_hz=_real(
                 values, "GESTURE_MOUSE_MAX_OUTPUT_HZ", defaults.max_output_hz
+            ),
+            button_policy=MouseButtonPolicy(
+                buttons_enabled=_boolean(
+                    values,
+                    "GESTURE_MOUSE_BUTTONS_ENABLED",
+                    defaults.button_policy.buttons_enabled,
+                ),
+                drag_enabled=_boolean(
+                    values,
+                    "GESTURE_MOUSE_DRAG_ENABLED",
+                    defaults.button_policy.drag_enabled,
+                ),
+                intent_activation_ms=_integer(
+                    values,
+                    "GESTURE_MOUSE_BUTTON_INTENT_ACTIVATION_MS",
+                    defaults.button_policy.intent_activation_ms,
+                ),
+                intent_release_ms=_integer(
+                    values,
+                    "GESTURE_MOUSE_BUTTON_INTENT_RELEASE_MS",
+                    defaults.button_policy.intent_release_ms,
+                ),
+                click_cooldown_ms=_integer(
+                    values,
+                    "GESTURE_MOUSE_CLICK_COOLDOWN_MS",
+                    defaults.button_policy.click_cooldown_ms,
+                ),
+                drag_hold_ms=_integer(
+                    values,
+                    "GESTURE_MOUSE_DRAG_HOLD_MS",
+                    defaults.button_policy.drag_hold_ms,
+                ),
+                contact_activation_threshold=_real(
+                    values,
+                    "GESTURE_MOUSE_CONTACT_ACTIVATION_THRESHOLD",
+                    defaults.button_policy.contact_activation_threshold,
+                ),
+                contact_release_threshold=_real(
+                    values,
+                    "GESTURE_MOUSE_CONTACT_RELEASE_THRESHOLD",
+                    defaults.button_policy.contact_release_threshold,
+                ),
+                contact_isolation_ratio=_real(
+                    values,
+                    "GESTURE_MOUSE_CONTACT_ISOLATION_RATIO",
+                    defaults.button_policy.contact_isolation_ratio,
+                ),
             ),
         )
     except MouseValidationError as exc:

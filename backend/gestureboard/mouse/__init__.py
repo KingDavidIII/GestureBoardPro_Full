@@ -1,5 +1,20 @@
-"""Public Alpha 1 API for transport-neutral gesture-mouse foundations."""
+"""Public transport-neutral gesture-mouse API."""
 
+from .button_output import (
+    MouseButtonOutputPort,
+    NullMouseButtonOutput,
+    WindowsMouseButtonOutput,
+)
+from .buttons import (
+    MouseButton,
+    MouseButtonActionKind,
+    MouseButtonController,
+    MouseButtonDecision,
+    MouseButtonIntent,
+    MouseButtonPolicy,
+    MouseButtonState,
+    detect_button_intent,
+)
 from .config import (
     GestureMouseConfigurationError,
     GestureMouseOutputMode,
@@ -41,6 +56,14 @@ from .tracking import INDEX_FINGERTIP_LANDMARK_INDEX, cursor_target_from_selecte
 
 __all__ = [
     "CursorTarget",
+    "MouseButton",
+    "MouseButtonActionKind",
+    "MouseButtonController",
+    "MouseButtonDecision",
+    "MouseButtonIntent",
+    "MouseButtonOutputPort",
+    "MouseButtonPolicy",
+    "MouseButtonState",
     "GestureMouseConfigurationError",
     "GestureMouseOutputMode",
     "GestureMouseRuntimeConfig",
@@ -56,6 +79,7 @@ __all__ = [
     "MouseSnapshot",
     "MouseValidationError",
     "NullMouseOutputPort",
+    "NullMouseButtonOutput",
     "NullVirtualCursorOutput",
     "MouseOwnershipLease",
     "INDEX_FINGERTIP_LANDMARK_INDEX",
@@ -68,11 +92,13 @@ __all__ = [
     "VirtualSurface",
     "VirtualCursorOutputPort",
     "WindowsCursorOutput",
+    "WindowsMouseButtonOutput",
     "WindowsCursorOwnershipLease",
     "WindowsDesktopBounds",
     "GestureMouseRuntimeCoordinator",
     "GestureMouseRuntimeResult",
     "cursor_target_from_selected_hand",
+    "detect_button_intent",
     "create_windows_cursor_api",
     "load_gesture_mouse_config",
 ]
