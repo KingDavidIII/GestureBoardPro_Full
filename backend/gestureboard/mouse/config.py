@@ -22,6 +22,11 @@ class GestureMouseOutputMode(StrEnum):
     WINDOWS = "windows"
 
 
+class MouseButtonOutputMode(StrEnum):
+    NULL = "null"
+    WINDOWS = "windows"
+
+
 @dataclass(frozen=True, slots=True)
 class GestureMouseRuntimeConfig:
     enabled: bool = False
@@ -35,6 +40,7 @@ class GestureMouseRuntimeConfig:
     dead_zone_radius: float = 0.0
     max_output_hz: float = 60.0
     button_policy: MouseButtonPolicy = field(default_factory=MouseButtonPolicy)
+    button_output_mode: MouseButtonOutputMode = MouseButtonOutputMode.NULL
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -44,6 +50,10 @@ class GestureMouseRuntimeConfig:
         if not isinstance(self.button_policy, MouseButtonPolicy):
             raise GestureMouseConfigurationError(
                 "button_policy must be a MouseButtonPolicy."
+            )
+        if not isinstance(self.button_output_mode, MouseButtonOutputMode):
+            raise GestureMouseConfigurationError(
+                "button_output_mode must be supported."
             )
         try:
             VirtualSurface(self.virtual_width_px, self.virtual_height_px)
@@ -163,6 +173,7 @@ def load_gesture_mouse_config(
                     defaults.button_policy.contact_isolation_ratio,
                 ),
             ),
+            button_output_mode=_button_output_mode(values, defaults.button_output_mode),
         )
     except MouseValidationError as exc:
         raise GestureMouseConfigurationError(str(exc)) from exc
@@ -197,6 +208,20 @@ def _mode(
     except ValueError as exc:
         raise GestureMouseConfigurationError(
             "GESTURE_MOUSE_OUTPUT_MODE must be virtual or windows."
+        ) from exc
+
+
+def _button_output_mode(
+    values: Mapping[str, str], default: MouseButtonOutputMode
+) -> MouseButtonOutputMode:
+    value = _value(values, "GESTURE_MOUSE_BUTTON_OUTPUT_MODE")
+    if value is None:
+        return default
+    try:
+        return MouseButtonOutputMode(value.lower())
+    except ValueError as exc:
+        raise GestureMouseConfigurationError(
+            "GESTURE_MOUSE_BUTTON_OUTPUT_MODE must be null or windows."
         ) from exc
 
 

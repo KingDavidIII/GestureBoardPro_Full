@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 from typing import Protocol
 
@@ -18,6 +19,46 @@ class MouseButtonOutputPort(Protocol):
 
 class WindowsMouseButtonApi(Protocol):
     def send_input(self, button: MouseButton, is_down: bool) -> bool: ...
+
+
+class _CtypesWindowsMouseButtonApi:
+    """Small production boundary; tests always inject a fake instead."""
+
+    _FLAGS = {
+        (MouseButton.PRIMARY, True): 0x0002,
+        (MouseButton.PRIMARY, False): 0x0004,
+        (MouseButton.SECONDARY, True): 0x0008,
+        (MouseButton.SECONDARY, False): 0x0010,
+    }
+
+    def __init__(self) -> None:
+        self._user32 = ctypes.windll.user32
+
+    def send_input(self, button: MouseButton, is_down: bool) -> bool:
+        # mouse INPUT is 40 bytes on 64-bit Windows; only the flag is relevant.
+        class MouseInput(ctypes.Structure):
+            _fields_ = [
+                ("dx", ctypes.c_long),
+                ("dy", ctypes.c_long),
+                ("mouseData", ctypes.c_ulong),
+                ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong),
+                ("dwExtraInfo", ctypes.c_void_p),
+            ]
+
+        class Input(ctypes.Structure):
+            _fields_ = [("type", ctypes.c_ulong), ("mi", MouseInput)]
+
+        item = Input(0, MouseInput(0, 0, 0, self._FLAGS[(button, is_down)], 0, None))
+        return bool(self._user32.SendInput(1, ctypes.byref(item), ctypes.sizeof(item)))
+
+
+def create_windows_mouse_button_api() -> WindowsMouseButtonApi:
+    """Construct the production button boundary only for explicit Windows mode."""
+
+    if os.name != "nt":
+        raise MouseOutputError("Windows button output is unavailable on this platform.")
+    return _CtypesWindowsMouseButtonApi()
 
 
 class NullMouseButtonOutput:

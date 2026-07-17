@@ -11,20 +11,14 @@ from typing import Any, Protocol
 
 import cv2
 import numpy as np
+from gestureboard.mouse.button_output import WindowsMouseButtonApi
+from gestureboard.mouse.composition import build_mouse_runtime_dependencies
 from gestureboard.mouse.config import (
-    GestureMouseOutputMode,
     GestureMouseRuntimeConfig,
     load_gesture_mouse_config,
 )
-from gestureboard.mouse.mapping import VirtualCursorMapper
 from gestureboard.mouse.models import MouseOutputError
-from gestureboard.mouse.output import (
-    NullVirtualCursorOutput,
-    WindowsCursorApi,
-    WindowsCursorOutput,
-    WindowsDesktopBounds,
-    create_windows_cursor_api,
-)
+from gestureboard.mouse.output import WindowsCursorApi
 from gestureboard.mouse.ownership import WindowsCursorOwnershipLease
 from gestureboard.mouse.runtime import GestureMouseRuntimeCoordinator
 from gestureboard.recognition.models import GestureId
@@ -39,8 +33,6 @@ from .gesture_engine import GestureObservation
 from .gesture_runtime import GestureRuntime, GestureRuntimeResult
 
 logger = logging.getLogger(__name__)
-
-_windows_mouse_lease = WindowsCursorOwnershipLease()
 
 
 class WebSocketRuntimeBridgeStage(StrEnum):
@@ -212,30 +204,59 @@ class WebSocketRuntimeBridge:
         mouse_config: GestureMouseRuntimeConfig | None = None,
         mouse_coordinator: GestureMouseRuntimeCoordinator | None = None,
         mouse_windows_api: WindowsCursorApi | None = None,
+        mouse_button_windows_api: WindowsMouseButtonApi | None = None,
         mouse_ownership_lease: WindowsCursorOwnershipLease | None = None,
     ) -> None:
-        self.config = config or WebSocketRuntimeBridgeConfig()
-        self.runtime = runtime if runtime is not None else GestureRuntime()
-        self.decoder = (
-            decoder
-            if decoder is not None
-            else OpenCVFrameDecoder(
-                self.config.maximum_decoded_width,
-                self.config.maximum_decoded_height,
-            )
-        )
         self._owns_runtime = runtime is None
         self._owns_decoder = decoder is None
-        self.annotated_frame_encoder = (
-            annotated_frame_encoder or AnnotatedFrameEncoder()
-        )
         self._owns_annotated_frame_encoder = annotated_frame_encoder is None
-        self.recognition_service = recognition_service or RecognitionService()
-        self.mouse_config = mouse_config or load_gesture_mouse_config()
-        self.mouse_coordinator = mouse_coordinator or self._create_mouse_coordinator(
-            mouse_windows_api=mouse_windows_api,
-            mouse_ownership_lease=mouse_ownership_lease,
-        )
+        self._owns_recognition_service = recognition_service is None
+        self._owns_mouse_coordinator = mouse_coordinator is None
+        self.runtime = None
+        self.decoder = None
+        self.annotated_frame_encoder = None
+        self.recognition_service = None
+        self.mouse_coordinator = None
+        try:
+            self.config = (
+                config if config is not None else WebSocketRuntimeBridgeConfig()
+            )
+            self.runtime = runtime if runtime is not None else GestureRuntime()
+            self.decoder = (
+                decoder
+                if decoder is not None
+                else OpenCVFrameDecoder(
+                    self.config.maximum_decoded_width,
+                    self.config.maximum_decoded_height,
+                )
+            )
+            self.annotated_frame_encoder = (
+                annotated_frame_encoder
+                if annotated_frame_encoder is not None
+                else AnnotatedFrameEncoder()
+            )
+            self.recognition_service = (
+                recognition_service
+                if recognition_service is not None
+                else RecognitionService()
+            )
+            self.mouse_config = (
+                mouse_config
+                if mouse_config is not None
+                else load_gesture_mouse_config()
+            )
+            self.mouse_coordinator = (
+                mouse_coordinator
+                if mouse_coordinator is not None
+                else self._create_mouse_coordinator(
+                    mouse_windows_api=mouse_windows_api,
+                    mouse_button_windows_api=mouse_button_windows_api,
+                    mouse_ownership_lease=mouse_ownership_lease,
+                )
+            )
+        except Exception:
+            self._cleanup_construction_failure()
+            raise
         self._annotation_enabled = False
         self._last_sequence: int | None = None
         self._closed = False
@@ -244,25 +265,38 @@ class WebSocketRuntimeBridge:
         self,
         *,
         mouse_windows_api: WindowsCursorApi | None,
+        mouse_button_windows_api: WindowsMouseButtonApi | None,
         mouse_ownership_lease: WindowsCursorOwnershipLease | None,
     ) -> GestureMouseRuntimeCoordinator:
-        config = self.mouse_config
-        mapper = VirtualCursorMapper(config.virtual_surface(), config.mapping_policy())
-        output = NullVirtualCursorOutput()
-        lease = None
-        if config.enabled and config.output_mode is GestureMouseOutputMode.WINDOWS:
-            api = mouse_windows_api or create_windows_cursor_api()
-            bounds = WindowsDesktopBounds.from_windows_api(api)
-            output = WindowsCursorOutput(bounds, api)
-            lease = mouse_ownership_lease or _windows_mouse_lease
-        return GestureMouseRuntimeCoordinator(
-            f"bridge-{id(self)}",
-            enabled=config.enabled,
-            mapper=mapper,
-            output=output,
-            max_output_hz=config.max_output_hz,
-            windows_lease=lease,
-        )
+        return build_mouse_runtime_dependencies(
+            self.mouse_config,
+            owner_id=f"bridge-{id(self)}",
+            cursor_api=mouse_windows_api,
+            button_api=mouse_button_windows_api,
+            ownership_lease=mouse_ownership_lease,
+        ).coordinator
+
+    def _cleanup_construction_failure(self) -> None:
+        for dependency, owned, operation_name in (
+            (
+                getattr(self, "recognition_service", None),
+                self._owns_recognition_service,
+                "reset",
+            ),
+            (
+                getattr(self, "annotated_frame_encoder", None),
+                self._owns_annotated_frame_encoder,
+                "close",
+            ),
+            (getattr(self, "decoder", None), self._owns_decoder, "close"),
+            (getattr(self, "runtime", None), self._owns_runtime, "close"),
+        ):
+            operation = getattr(dependency, operation_name, None)
+            if owned and callable(operation):
+                try:
+                    operation()
+                except Exception:
+                    pass
 
     def process_frame(
         self,
@@ -499,16 +533,24 @@ class WebSocketRuntimeBridge:
                 "Gesture runtime could not be reset.",
             ) from error
         self.recognition_service.reset()
-        self.mouse_coordinator.tracking_lost(timestamp_ms=0)
+        self.mouse_coordinator.tracking_lost()
         self._last_sequence = None
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        self.recognition_service.reset()
-        self.mouse_coordinator.close()
         failures: list[Exception] = []
+        operations = []
+        if self._owns_recognition_service:
+            operations.append(self.recognition_service.reset)
+        if self._owns_mouse_coordinator:
+            operations.append(self.mouse_coordinator.close)
+        for operation in operations:
+            try:
+                operation()
+            except Exception as error:
+                failures.append(error)
         for dependency, owned in (
             (self.runtime, self._owns_runtime),
             (self.decoder, self._owns_decoder),
@@ -532,6 +574,7 @@ class WebSocketRuntimeBridge:
 
         timestamp_ms = 0
         selected = None
+        stable = None
         if recognition_result is not None:
             timestamp = getattr(recognition_result, "timestamp_ms", 0)
             if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
@@ -541,13 +584,17 @@ class WebSocketRuntimeBridge:
             if getattr(stable, "gesture_id", None) is not GestureId.POINT:
                 selected = None
         try:
-            self.mouse_coordinator.process(selected, timestamp_ms=timestamp_ms)
+            self.mouse_coordinator.process(
+                selected,
+                timestamp_ms=timestamp_ms,
+                stable_gesture=getattr(stable, "gesture_id", None),
+            )
         except MouseOutputError:
             logger.warning("Gesture mouse output failed for frame %s", sequence)
 
     def _reset_mouse_safely(self) -> None:
         try:
-            self.mouse_coordinator.tracking_lost(timestamp_ms=0)
+            self.mouse_coordinator.tracking_lost()
         except Exception:
             logger.warning("Gesture mouse tracking reset failed.")
 

@@ -414,6 +414,332 @@ class BridgeProcessingTests(SimpleTestCase):
 
 
 class BridgeLifecycleTests(SimpleTestCase):
+    def test_bridge_rolls_back_runtime_when_decoder_construction_fails(self) -> None:
+        runtime = MagicMock()
+        with (
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.GestureRuntime",
+                return_value=runtime,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.OpenCVFrameDecoder",
+                side_effect=RuntimeError("decoder"),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "decoder"):
+                WebSocketRuntimeBridge()
+        runtime.close.assert_called_once_with()
+
+    def test_bridge_rolls_back_runtime_and_decoder_when_encoder_construction_fails(
+        self,
+    ) -> None:
+        runtime, decoder = MagicMock(), FakeDecoder()
+        with (
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.GestureRuntime",
+                return_value=runtime,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.OpenCVFrameDecoder",
+                return_value=decoder,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.AnnotatedFrameEncoder",
+                side_effect=RuntimeError("encoder construction failure"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "encoder construction failure"),
+        ):
+            WebSocketRuntimeBridge()
+        runtime.close.assert_called_once_with()
+        self.assertEqual(decoder.close_count, 1)
+
+    def test_bridge_rolls_back_owned_dependencies_when_recognition_construction_fails(
+        self,
+    ) -> None:
+        runtime, decoder, encoder = MagicMock(), FakeDecoder(), MagicMock()
+        with (
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.GestureRuntime",
+                return_value=runtime,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.OpenCVFrameDecoder",
+                return_value=decoder,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.AnnotatedFrameEncoder",
+                return_value=encoder,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.RecognitionService",
+                side_effect=RuntimeError("recognition construction failure"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "recognition construction failure"),
+        ):
+            WebSocketRuntimeBridge()
+        runtime.close.assert_called_once_with()
+        encoder.close.assert_called_once_with()
+        self.assertEqual(decoder.close_count, 1)
+
+    def test_bridge_rolls_back_owned_dependencies_when_mouse_config_loading_fails(
+        self,
+    ) -> None:
+        runtime, decoder, encoder, recognition = (
+            MagicMock(),
+            FakeDecoder(),
+            MagicMock(),
+            MagicMock(),
+        )
+        with (
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.GestureRuntime",
+                return_value=runtime,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.OpenCVFrameDecoder",
+                return_value=decoder,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.AnnotatedFrameEncoder",
+                return_value=encoder,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.RecognitionService",
+                return_value=recognition,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.load_gesture_mouse_config",
+                side_effect=RuntimeError("mouse config failure"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "mouse config failure"),
+        ):
+            WebSocketRuntimeBridge()
+        runtime.close.assert_called_once_with()
+        encoder.close.assert_called_once_with()
+        recognition.reset.assert_called_once_with()
+        self.assertEqual(decoder.close_count, 1)
+
+    def test_bridge_rolls_back_owned_dependencies_when_mouse_composition_fails(
+        self,
+    ) -> None:
+        runtime, decoder, encoder, recognition = (
+            MagicMock(),
+            FakeDecoder(),
+            MagicMock(),
+            MagicMock(),
+        )
+        with (
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.GestureRuntime",
+                return_value=runtime,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.OpenCVFrameDecoder",
+                return_value=decoder,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.AnnotatedFrameEncoder",
+                return_value=encoder,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.RecognitionService",
+                return_value=recognition,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.build_mouse_runtime_dependencies",
+                side_effect=RuntimeError("mouse composition failure"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "mouse composition failure"),
+        ):
+            WebSocketRuntimeBridge()
+        runtime.close.assert_called_once_with()
+        encoder.close.assert_called_once_with()
+        recognition.reset.assert_called_once_with()
+        self.assertEqual(decoder.close_count, 1)
+
+    def test_bridge_rollback_cleanup_failure_preserves_original_error(self) -> None:
+        runtime, decoder, encoder, recognition = (
+            MagicMock(),
+            FakeDecoder(),
+            MagicMock(),
+            MagicMock(),
+        )
+        encoder.close.side_effect = RuntimeError("cleanup")
+        with (
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.GestureRuntime",
+                return_value=runtime,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.OpenCVFrameDecoder",
+                return_value=decoder,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.AnnotatedFrameEncoder",
+                return_value=encoder,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.RecognitionService",
+                return_value=recognition,
+            ),
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.build_mouse_runtime_dependencies",
+                side_effect=RuntimeError("mouse composition failure"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "mouse composition failure"),
+        ):
+            WebSocketRuntimeBridge()
+        runtime.close.assert_called_once_with()
+        recognition.reset.assert_called_once_with()
+        self.assertEqual(decoder.close_count, 1)
+
+    def test_falsy_bridge_dependencies_are_retained_and_external(self) -> None:
+        class FalsyRuntime:
+            def __init__(self):
+                self.close_calls = 0
+
+            def __bool__(self):
+                return False
+
+            def close(self):
+                self.close_calls += 1
+
+        class FalsyDecoder:
+            def __init__(self):
+                self.close_calls = 0
+
+            def __bool__(self):
+                return False
+
+            def close(self):
+                self.close_calls += 1
+
+        class FalsyEncoder:
+            def __init__(self):
+                self.close_calls = 0
+
+            def __bool__(self):
+                return False
+
+            def close(self):
+                self.close_calls += 1
+
+        class FalsyRecognitionService:
+            def __init__(self):
+                self.reset_calls = 0
+
+            def __bool__(self):
+                return False
+
+            def reset(self):
+                self.reset_calls += 1
+
+        class FalsyMouseCoordinator:
+            def __init__(self):
+                self.close_calls = 0
+
+            def __bool__(self):
+                return False
+
+            def close(self):
+                self.close_calls += 1
+
+            def tracking_lost(self):
+                return None
+
+        runtime, decoder, encoder, recognition, coordinator = (
+            FalsyRuntime(),
+            FalsyDecoder(),
+            FalsyEncoder(),
+            FalsyRecognitionService(),
+            FalsyMouseCoordinator(),
+        )
+        config = GestureMouseRuntimeConfig()
+        with (
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.GestureRuntime"
+            ) as runtime_default,
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.OpenCVFrameDecoder"
+            ) as decoder_default,
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.AnnotatedFrameEncoder"
+            ) as encoder_default,
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.RecognitionService"
+            ) as recognition_default,
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.load_gesture_mouse_config"
+            ) as config_default,
+            patch(
+                "gestureboard.services.websocket_runtime_bridge.build_mouse_runtime_dependencies"
+            ) as composition_default,
+        ):
+            bridge = WebSocketRuntimeBridge(
+                runtime,
+                decoder,
+                annotated_frame_encoder=encoder,
+                recognition_service=recognition,
+                mouse_config=config,
+                mouse_coordinator=coordinator,
+            )
+        self.assertIs(bridge.runtime, runtime)
+        self.assertIs(bridge.decoder, decoder)
+        self.assertIs(bridge.annotated_frame_encoder, encoder)
+        self.assertIs(bridge.recognition_service, recognition)
+        self.assertIs(bridge.mouse_coordinator, coordinator)
+        bridge.close()
+        bridge.close()
+        self.assertEqual(
+            (
+                runtime.close_calls,
+                decoder.close_calls,
+                encoder.close_calls,
+                recognition.reset_calls,
+                coordinator.close_calls,
+            ),
+            (0, 0, 0, 0, 0),
+        )
+        for default in (
+            runtime_default,
+            decoder_default,
+            encoder_default,
+            recognition_default,
+            config_default,
+            composition_default,
+        ):
+            default.assert_not_called()
+
+    def test_protocol_response_recursively_excludes_mouse_internal_keys(self) -> None:
+        forbidden = {
+            "button_decision",
+            "button_action",
+            "mouse_button",
+            "drag_action",
+            "primary_down",
+            "primary_up",
+            "secondary_click",
+            "ownership",
+            "owner_id",
+            "lease",
+            "lease_owner",
+            "windows_lease",
+        }
+
+        def walk(value):
+            if isinstance(value, dict):
+                self.assertFalse(forbidden & set(value))
+                for nested in value.values():
+                    walk(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    walk(nested)
+
+        runtime = MagicMock()
+        runtime.process.return_value = runtime_result()
+        bridge = WebSocketRuntimeBridge(runtime, FakeDecoder())
+        walk(bridge.process_frame(b"frame"))
+
     def test_injected_dependencies_are_not_closed_and_use_is_rejected(self) -> None:
         runtime = MagicMock()
         decoder = FakeDecoder()
@@ -441,10 +767,34 @@ class BridgeLifecycleTests(SimpleTestCase):
             ),
         ):
             with WebSocketRuntimeBridge() as bridge:
-                pass
+                self.assertFalse(bridge._closed)
             bridge.close()
         runtime.close.assert_called_once_with()
         self.assertEqual(decoder.close_count, 1)
+
+    def test_injected_mouse_coordinator_is_not_closed(self) -> None:
+        runtime = MagicMock()
+        decoder = FakeDecoder()
+        coordinator = MagicMock()
+        bridge = WebSocketRuntimeBridge(runtime, decoder, mouse_coordinator=coordinator)
+
+        bridge.close()
+        bridge.close()
+
+        coordinator.close.assert_not_called()
+
+    def test_owned_mouse_coordinator_is_closed_once(self) -> None:
+        runtime = MagicMock()
+        decoder = FakeDecoder()
+        coordinator = MagicMock()
+        with patch(
+            "gestureboard.services.websocket_runtime_bridge.build_mouse_runtime_dependencies"
+        ) as factory:
+            factory.return_value = SimpleNamespace(coordinator=coordinator)
+            bridge = WebSocketRuntimeBridge(runtime, decoder)
+        bridge.close()
+        bridge.close()
+        coordinator.close.assert_called_once_with()
 
 
 class GestureMouseBridgeIntegrationTests(SimpleTestCase):
@@ -486,7 +836,7 @@ class GestureMouseBridgeIntegrationTests(SimpleTestCase):
         output = RecordingCursorOutput()
         coordinator = GestureMouseRuntimeCoordinator("disabled", output=output)
         with patch(
-            "gestureboard.services.websocket_runtime_bridge.create_windows_cursor_api"
+            "gestureboard.mouse.composition.create_windows_cursor_api"
         ) as api_factory:
             response = self._bridge(
                 coordinator, GestureMouseRuntimeConfig()
@@ -609,11 +959,85 @@ class GestureMouseBridgeIntegrationTests(SimpleTestCase):
         response = bridge.process_frame(b"frame")
         bridge.close()
         bridge.close()
-        self.assertEqual(output.closed, 1)
+        self.assertEqual(output.closed, 0)
         self.assertNotIn("mouse", response)
+
+    def test_bridge_forwards_cached_hand_stable_id_and_timestamp_once(self) -> None:
+        coordinator = MagicMock()
+        bridge = self._bridge(coordinator)
+
+        response = bridge.process_frame(b"forwarded")
+
+        self.assertEqual(response["type"], "gesture.result")
+        coordinator.process.assert_called_once_with(
+            self.hand, timestamp_ms=123, stable_gesture=GestureId.POINT
+        )
+        self.assertEqual(self.decoder.payloads, [b"forwarded"])
+        self.runtime.process.assert_called_once_with(self.decoder.frame, timestamp=None)
+        self.recognition.process.assert_called_once_with(
+            self.runtime.process.return_value.pipeline_result.mediapipe_result,
+            frame_sequence=0,
+        )
+
+    def test_response_does_not_serialize_button_actions(self) -> None:
+        coordinator = MagicMock()
+        response = self._bridge(coordinator).process_frame(b"no-button-transport")
+
+        serialized = json.dumps(response)
+        for field in (
+            "button_decision",
+            "mouse_button",
+            "button_action",
+            "drag_action",
+        ):
+            with self.subTest(field=field):
+                self.assertNotIn(field, serialized)
+
+    def test_close_aggregates_owned_cleanup_and_preserves_first_cause(self) -> None:
+        runtime = MagicMock()
+        runtime.close.side_effect = RuntimeError("runtime close failure")
+        decoder = FakeDecoder()
+        decoder.close = MagicMock(side_effect=RuntimeError("decoder close failure"))
+        recognition = MagicMock()
+        recognition.reset.side_effect = RuntimeError("recognition reset failure")
+        coordinator = MagicMock()
+        coordinator.close.side_effect = RuntimeError("coordinator close failure")
+        encoder = MagicMock()
+        encoder.close.side_effect = RuntimeError("encoder close failure")
+        bridge = WebSocketRuntimeBridge(
+            runtime,
+            decoder,
+            recognition_service=recognition,
+            mouse_coordinator=coordinator,
+            annotated_frame_encoder=encoder,
+        )
+        bridge._owns_runtime = True
+        bridge._owns_decoder = True
+        bridge._owns_annotated_frame_encoder = True
+
+        with self.assertRaises(WebSocketRuntimeBridgeError) as raised:
+            bridge.close()
+        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
+        self.assertEqual(str(raised.exception.__cause__), "runtime close failure")
+        coordinator.close.assert_not_called()
+        runtime.close.assert_called_once_with()
+        decoder.close.assert_called_once_with()
+        encoder.close.assert_called_once_with()
+        bridge.close()
+        coordinator.close.assert_not_called()
 
 
 class OpenCVDecoderIntegrationTests(SimpleTestCase):
+    def test_bridge_response_schema_has_no_button_action_fields(self) -> None:
+        response = {
+            "protocol_version": 1,
+            "type": "gesture.result",
+            "gesture": {"label": "unknown"},
+        }
+        self.assertFalse(
+            {"button_action", "button_decision", "mouse_button"} & response.keys()
+        )
+
     def test_real_png_decoding_reaches_fake_runtime_as_bgr(self) -> None:
         source = np.zeros((3, 4, 3), np.uint8)
         source[:, :, 2] = 255
