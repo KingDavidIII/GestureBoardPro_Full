@@ -60,13 +60,21 @@ class GestureMouseRuntimeCoordinator:
         self._owner_id = owner_id
         self._enabled = enabled
         self._service = GestureMouseService()
-        self._mapper = mapper or VirtualCursorMapper(VirtualSurface(1280, 720))
-        self._output = output or NullVirtualCursorOutput()
+        self._mapper = (
+            mapper
+            if mapper is not None
+            else VirtualCursorMapper(VirtualSurface(1280, 720))
+        )
+        self._output = output if output is not None else NullVirtualCursorOutput()
         self._max_output_hz = max_output_hz
         self._lease = windows_lease
-        self._button_policy = button_policy or MouseButtonPolicy()
+        self._button_policy = (
+            button_policy if button_policy is not None else MouseButtonPolicy()
+        )
         self._button_controller = MouseButtonController(self._button_policy)
-        self._button_output = button_output or NullMouseButtonOutput()
+        self._button_output = (
+            button_output if button_output is not None else NullMouseButtonOutput()
+        )
         self._last_button_decision: MouseButtonDecision | None = None
         self._last_output_ms: float | None = None
         self._last_accepted_timestamp_ms = 0
@@ -88,16 +96,21 @@ class GestureMouseRuntimeCoordinator:
             self._accept_process_timestamp(timestamp_ms)
             if not self._enabled:
                 return GestureMouseRuntimeResult(None, False, False)
-            button_decision = self._process_buttons(
-                selected, timestamp_ms, stable_gesture
-            )
             target = cursor_target_from_selected_hand(
                 selected, timestamp_ms=timestamp_ms
+            )
+            if target is not None and self._lease is not None:
+                if not self._lease.acquire(self._owner_id):
+                    return GestureMouseRuntimeResult(None, False, False)
+            button_decision = self._process_buttons(
+                selected, timestamp_ms, stable_gesture
             )
             if target is None:
                 self._service.tracking_lost(timestamp_ms=timestamp_ms)
                 self._mapper.reset()
                 self._last_output_ms = None
+                if self._lease is not None:
+                    self._lease.release(self._owner_id)
                 return GestureMouseRuntimeResult(None, False, False, button_decision)
             self._service.tracking_acquired(timestamp_ms=timestamp_ms)
             if not self._service.submit_target(target):
@@ -107,8 +120,6 @@ class GestureMouseRuntimeCoordinator:
                 return GestureMouseRuntimeResult(mapping, False, False, button_decision)
             if mapping.source_reset:
                 self._last_output_ms = None
-            if self._lease is not None and not self._lease.acquire(self._owner_id):
-                return GestureMouseRuntimeResult(mapping, False, False, button_decision)
             minimum_interval = 1000 / self._max_output_hz
             if (
                 self._last_output_ms is not None
@@ -117,12 +128,9 @@ class GestureMouseRuntimeCoordinator:
                 return GestureMouseRuntimeResult(mapping, False, True, button_decision)
             try:
                 self._output.move(mapping.virtual_target)
-            except MouseOutputError as error:
-                try:
-                    self.emergency_stop(timestamp_ms=timestamp_ms)
-                except Exception:
-                    pass
-                raise error
+            except MouseOutputError:
+                self._fail_closed_after_output_error(timestamp_ms)
+                raise
             self._last_output_ms = timestamp_ms
             return GestureMouseRuntimeResult(mapping, True, False, button_decision)
 
@@ -166,20 +174,33 @@ class GestureMouseRuntimeCoordinator:
         self._last_button_decision = decision
         try:
             self._apply_button_action(decision)
-        except MouseOutputError as error:
-            try:
-                self._button_output.release_all()
-            except Exception:
-                pass
-            try:
-                cleanup_decision = self._button_controller.emergency_stop(
-                    timestamp_ms=timestamp_ms
-                )
-                self._last_button_decision = cleanup_decision
-            except Exception:
-                pass
-            raise error
+        except MouseOutputError:
+            self._fail_closed_after_output_error(timestamp_ms)
+            raise
         return decision
+
+    def _fail_closed_after_output_error(self, timestamp_ms: int) -> None:
+        """Best-effort cleanup which never replaces the originating output error."""
+
+        for operation in (
+            self._button_output.release_all,
+            lambda: self._button_controller.emergency_stop(timestamp_ms=timestamp_ms),
+            lambda: self._service.emergency_stop(timestamp_ms=timestamp_ms),
+            self._mapper.reset,
+            lambda: (
+                self._lease.release(self._owner_id) if self._lease is not None else None
+            ),
+        ):
+            if operation is None:
+                continue
+            try:
+                result = operation()
+                if isinstance(result, MouseButtonDecision):
+                    self._last_button_decision = result
+            except Exception:
+                pass
+        self._last_output_ms = None
+        self._enabled = False
 
     def _apply_button_action(self, decision: MouseButtonDecision) -> None:
         action = decision.action

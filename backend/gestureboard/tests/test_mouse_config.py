@@ -24,6 +24,7 @@ class GestureMouseConfigTests(TestCase):
         self.assertEqual(config.button_policy, MouseButtonPolicy())
         self.assertFalse(config.button_policy.buttons_enabled)
         self.assertFalse(config.button_policy.drag_enabled)
+        self.assertEqual(config.button_output_mode.value, "null")
 
     def test_all_environment_overrides_are_parsed(self) -> None:
         config = load_gesture_mouse_config(
@@ -42,6 +43,7 @@ class GestureMouseConfigTests(TestCase):
                 "GESTURE_MOUSE_ACTIVE_BOTTOM": "0.8",
                 "GESTURE_MOUSE_MAX_OUTPUT_HZ": "120",
                 "GESTURE_MOUSE_BUTTONS_ENABLED": "true",
+                "GESTURE_MOUSE_BUTTON_OUTPUT_MODE": "windows",
                 "GESTURE_MOUSE_DRAG_ENABLED": "on",
                 "GESTURE_MOUSE_BUTTON_INTENT_ACTIVATION_MS": "1",
                 "GESTURE_MOUSE_BUTTON_INTENT_RELEASE_MS": "2",
@@ -60,6 +62,7 @@ class GestureMouseConfigTests(TestCase):
         self.assertEqual(config.button_policy.intent_activation_ms, 1)
         self.assertEqual(config.button_policy.drag_hold_ms, 4)
         self.assertTrue(config.button_policy.buttons_enabled)
+        self.assertEqual(config.button_output_mode.value, "windows")
 
     def test_blank_values_use_defaults(self) -> None:
         self.assertEqual(
@@ -79,6 +82,7 @@ class GestureMouseConfigTests(TestCase):
             {"GESTURE_MOUSE_MAX_OUTPUT_HZ": "0"},
             {"GESTURE_MOUSE_MAX_OUTPUT_HZ": "241"},
             {"GESTURE_MOUSE_BUTTONS_ENABLED": "perhaps"},
+            {"GESTURE_MOUSE_BUTTON_OUTPUT_MODE": "other"},
             {"GESTURE_MOUSE_BUTTON_INTENT_ACTIVATION_MS": "nope"},
             {"GESTURE_MOUSE_BUTTON_INTENT_RELEASE_MS": "0"},
             {"GESTURE_MOUSE_CLICK_COOLDOWN_MS": "-1"},

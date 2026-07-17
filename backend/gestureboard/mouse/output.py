@@ -97,7 +97,7 @@ class WindowsCursorOutput:
                 "Windows cursor output is unavailable on this platform."
             )
         self._bounds = bounds
-        self._api = api or _CtypesWindowsCursorApi()
+        self._api = api if api is not None else _CtypesWindowsCursorApi()
         self._closed = False
 
     def move(self, target: VirtualCursorTarget) -> None:

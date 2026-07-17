@@ -4,6 +4,7 @@ from .button_output import (
     MouseButtonOutputPort,
     NullMouseButtonOutput,
     WindowsMouseButtonOutput,
+    create_windows_mouse_button_api,
 )
 from .buttons import (
     MouseButton,
@@ -15,10 +16,12 @@ from .buttons import (
     MouseButtonState,
     detect_button_intent,
 )
+from .composition import MouseRuntimeDependencies, build_mouse_runtime_dependencies
 from .config import (
     GestureMouseConfigurationError,
     GestureMouseOutputMode,
     GestureMouseRuntimeConfig,
+    MouseButtonOutputMode,
     load_gesture_mouse_config,
 )
 from .mapping import (
@@ -62,6 +65,8 @@ __all__ = [
     "MouseButtonDecision",
     "MouseButtonIntent",
     "MouseButtonOutputPort",
+    "MouseButtonOutputMode",
+    "MouseRuntimeDependencies",
     "MouseButtonPolicy",
     "MouseButtonState",
     "GestureMouseConfigurationError",
@@ -100,5 +105,7 @@ __all__ = [
     "cursor_target_from_selected_hand",
     "detect_button_intent",
     "create_windows_cursor_api",
+    "create_windows_mouse_button_api",
+    "build_mouse_runtime_dependencies",
     "load_gesture_mouse_config",
 ]

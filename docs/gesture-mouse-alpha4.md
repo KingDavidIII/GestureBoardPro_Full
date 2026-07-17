@@ -37,6 +37,49 @@ is made by the unit suite. Failed native cleanup remains retryable and a failed
 close does not discard logical held state. Buttons and drag are disabled by
 default. There is no button-action WebSocket transport and no live Windows
 click/drag test; frontend and protocol version 1 remain unchanged.
+
+Runtime/bridge construction now composes the validated cursor and button
+outputs in one dependency-injectable factory. Buttons remain disabled by
+default, and enabled buttons use the null output unless Windows output is
+explicitly configured. Explicit Windows selection fails during construction on
+unsupported platforms; the native cursor and SendInput boundaries are injected
+in unit tests, so those tests perform no real native calls. The coordinator
+owns only outputs it constructs through this composition path; supplied
+coordinators remain externally owned.
+
+Any explicit Windows cursor or button mode is validated during composition,
+including while that feature is disabled; disabled features retain null runtime
+outputs and do not construct native APIs. Active native output requires one
+caller-supplied application-scoped ownership lease shared by every bridge.
+Ownership is acquired before actionable cursor or button processing, so a
+denied coordinator emits neither cursor movement nor button actions. Ownership
+transfers only after lifecycle cleanup releases it. Construction failures clean
+up already owned dependencies best-effort while preserving the original error.
+
+Button-only native composition receives that exact same shared lease. Denied
+frames do not advance actionable button state. A button-output failure performs
+fail-closed cleanup, releases ownership, and leaves another coordinator free to
+acquire it. Complete bridge construction is transactional: rollback preserves
+the original construction error and never treats injected dependencies as owned,
+including falsy injected objects. Protocol version 1 remains unchanged and no
+WebSocket button-action transport exists; real Windows end-to-end behaviour is
+still unverified and Alpha 4 remains incomplete.
+
+Falsy injected native boundaries are retained through explicit `None` checks;
+they are never replaced by duplicate production boundaries. Global mouse
+enablement gates native button construction: disabled mouse configurations use
+the null button output and construct no native API, although explicit Windows
+modes are still validated. Composed click and drag paths, lease denial and
+transfer, and failure cleanup are exercised with fake native boundaries only.
+Factory and bridge rollback, falsy injected dependencies, and recursive
+protocol isolation are also covered without real Windows input. Protocol
+version 1 remains unchanged.
+
+Runtime composition also preserves falsy injected mapper, cursor-output,
+button-policy, and button-output dependencies through explicit `None` checks.
+The fake-boundary suite covers composed clicks, movement during active drags,
+owner denial and transfer, failure cleanup, rollback paths, falsy dependencies,
+and recursive protocol isolation. No live Windows validation has been run.
 Native-boundary exceptions are normalised to `MouseOutputError`.
 Scrolling, keyboard input, double-clicking, and global hotkeys are not
 implemented.
