@@ -25,3 +25,21 @@ class MouseOwnershipTests(TestCase):
             outcomes = list(executor.map(lease.acquire, ("a", "b")))
         self.assertEqual(outcomes.count(True), 1)
         self.assertIn(lease.owner_id, {"a", "b"})
+
+    def test_cross_process_configuration_is_idempotent_without_disturbing_owner(self):
+        class Mutex:
+            def release(self):
+                return None
+
+        lease = WindowsCursorOwnershipLease()
+        lease.enable_cross_process(Mutex)
+        self.assertTrue(lease.acquire("a"))
+        lease.enable_cross_process(Mutex)
+        self.assertEqual(lease.owner_id, "a")
+
+        class ConflictingMutex(Mutex):
+            pass
+
+        with self.assertRaisesRegex(MouseValidationError, "different factory"):
+            lease.enable_cross_process(ConflictingMutex)
+        self.assertEqual(lease.owner_id, "a")

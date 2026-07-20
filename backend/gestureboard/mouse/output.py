@@ -19,6 +19,7 @@ class VirtualCursorOutputPort(Protocol):
 class WindowsCursorApi(Protocol):
     def get_system_metrics(self, metric_id: int) -> int: ...
     def set_cursor_pos(self, x: int, y: int) -> bool: ...
+    def get_cursor_pos(self) -> tuple[int, int]: ...
 
 
 _SM_XVIRTUALSCREEN = 76
@@ -29,13 +30,27 @@ _SM_CYVIRTUALSCREEN = 79
 
 class _CtypesWindowsCursorApi:
     def __init__(self) -> None:
-        self._user32 = ctypes.windll.user32
+        self._user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self._user32.SetCursorPos.argtypes = (ctypes.c_int, ctypes.c_int)
+        self._user32.SetCursorPos.restype = ctypes.c_bool
+        self._user32.GetCursorPos.argtypes = (ctypes.POINTER(ctypes.wintypes.POINT),)
+        self._user32.GetCursorPos.restype = ctypes.c_bool
+        self._user32.GetSystemMetrics.argtypes = (ctypes.c_int,)
+        self._user32.GetSystemMetrics.restype = ctypes.c_int
 
     def get_system_metrics(self, metric_id: int) -> int:
         return int(self._user32.GetSystemMetrics(metric_id))
 
     def set_cursor_pos(self, x: int, y: int) -> bool:
-        return bool(self._user32.SetCursorPos(x, y))
+        if not self._user32.SetCursorPos(x, y):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return True
+
+    def get_cursor_pos(self) -> tuple[int, int]:
+        point = ctypes.wintypes.POINT()
+        if not self._user32.GetCursorPos(ctypes.byref(point)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return (int(point.x), int(point.y))
 
 
 def create_windows_cursor_api() -> WindowsCursorApi:

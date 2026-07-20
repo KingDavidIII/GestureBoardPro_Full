@@ -28,7 +28,7 @@ from .output import (
     WindowsDesktopBounds,
     create_windows_cursor_api,
 )
-from .ownership import WindowsCursorOwnershipLease
+from .ownership import WindowsCursorOwnershipLease, WindowsNamedMutex
 from .runtime import GestureMouseRuntimeCoordinator
 
 
@@ -47,6 +47,7 @@ def build_mouse_runtime_dependencies(
     cursor_api: WindowsCursorApi | None = None,
     button_api: WindowsMouseButtonApi | None = None,
     ownership_lease: WindowsCursorOwnershipLease | None = None,
+    mutex_factory: Callable[[], WindowsNamedMutex] = WindowsNamedMutex,
     platform_name: str | None = None,
     cursor_output_factory: Callable[..., VirtualCursorOutputPort] = WindowsCursorOutput,
     button_output_factory: Callable[
@@ -78,6 +79,8 @@ def build_mouse_runtime_dependencies(
     cursor_output: VirtualCursorOutputPort = NullVirtualCursorOutput()
     button_output: MouseButtonOutputPort = NullMouseButtonOutput()
     lease = ownership_lease if active_native_output else None
+    if lease is not None:
+        lease.enable_cross_process(mutex_factory)
     try:
         if config.enabled and config.output_mode is GestureMouseOutputMode.WINDOWS:
             api = cursor_api if cursor_api is not None else create_windows_cursor_api()

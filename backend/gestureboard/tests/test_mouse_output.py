@@ -20,6 +20,7 @@ class FakeWindowsApi:
         self.succeeds = succeeds
         self.metric_calls: list[int] = []
         self.moves: list[tuple[int, int]] = []
+        self.position = (0, 0)
 
     def get_system_metrics(self, metric_id: int) -> int:
         self.metric_calls.append(metric_id)
@@ -27,7 +28,12 @@ class FakeWindowsApi:
 
     def set_cursor_pos(self, x: int, y: int) -> bool:
         self.moves.append((x, y))
+        if self.succeeds:
+            self.position = (x, y)
         return self.succeeds
+
+    def get_cursor_pos(self) -> tuple[int, int]:
+        return self.position
 
 
 def target(x: int, y: int) -> VirtualCursorTarget:
@@ -58,6 +64,7 @@ class WindowsCursorOutputTests(TestCase):
         output.move(target(199, 99))
         output.move(target(999, 0))
         self.assertEqual(api.moves, [(-100, -50), (99, 49), (99, -50)])
+        self.assertEqual(api.get_cursor_pos(), (99, -50))
 
     def test_output_failure_platform_and_lifecycle_are_safe(self) -> None:
         api = FakeWindowsApi((0, 0, 10, 10), succeeds=False)
