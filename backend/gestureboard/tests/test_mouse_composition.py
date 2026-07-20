@@ -61,6 +61,25 @@ class FalsyButtonApi(FakeButtonApi):
         return False
 
 
+class FakeNamedMutexApi:
+    def create(self, name):
+        return object(), False
+
+    def release(self, handle):
+        return None
+
+
+class FakeNamedMutex:
+    instances = []
+
+    def __init__(self):
+        self.released = False
+        self.instances.append(self)
+
+    def release(self):
+        self.released = True
+
+
 def selected_hand(x: float = 0.25) -> HandSelection:
     points = [Landmark3D(0, 0, 0) for _ in range(21)]
     points[8] = Landmark3D(x, 0.75, 0)
@@ -70,6 +89,14 @@ def selected_hand(x: float = 0.25) -> HandSelection:
 
 
 class MouseCompositionTests(SimpleTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = patch(
+            "gestureboard.mouse.ownership._CtypesNamedMutexApi", FakeNamedMutexApi
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_composed_drag_moves_after_primary_down(self) -> None:
         policy = MouseButtonPolicy(buttons_enabled=True, drag_enabled=True)
         cursor, buttons, lease = (
@@ -209,6 +236,46 @@ class MouseCompositionTests(SimpleTestCase):
         )
         self.assertIs(first.ownership_lease, lease)
         self.assertIs(second.ownership_lease, lease)
+
+    def test_production_composition_configures_mutex_idempotently(self) -> None:
+        FakeNamedMutex.instances.clear()
+        lease = WindowsCursorOwnershipLease()
+        config = GestureMouseRuntimeConfig(
+            enabled=True,
+            output_mode=GestureMouseOutputMode.WINDOWS,
+        )
+        first_api, second_api = FakeCursorApi(), FakeCursorApi()
+        first = build_mouse_runtime_dependencies(
+            config,
+            owner_id="first",
+            cursor_api=first_api,
+            ownership_lease=lease,
+            platform_name="nt",
+            mutex_factory=FakeNamedMutex,
+        )
+        first.coordinator.process(
+            selected_hand(), timestamp_ms=0, stable_gesture=GestureId.POINT
+        )
+        second = build_mouse_runtime_dependencies(
+            config,
+            owner_id="second",
+            cursor_api=second_api,
+            ownership_lease=lease,
+            platform_name="nt",
+            mutex_factory=FakeNamedMutex,
+        )
+        denied = second.coordinator.process(
+            selected_hand(), timestamp_ms=0, stable_gesture=GestureId.POINT
+        )
+        self.assertFalse(denied.moved)
+        self.assertEqual(second_api.moves, [])
+        first.coordinator.tracking_lost()
+        accepted = second.coordinator.process(
+            selected_hand(), timestamp_ms=1, stable_gesture=GestureId.POINT
+        )
+        self.assertTrue(accepted.moved)
+        self.assertEqual(len(FakeNamedMutex.instances), 2)
+        self.assertTrue(FakeNamedMutex.instances[0].released)
 
     def test_button_failure_releases_lease_for_second_composed_coordinator(
         self,
