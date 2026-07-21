@@ -22,6 +22,10 @@ import type {
   GestureWebSocketClientEvent,
   WebSocketClientState,
 } from "../websocket";
+import {
+  AnnotationCorrelation,
+  type AnnotationCorrelationUpdate,
+} from "./annotation-correlation";
 
 const MAXIMUM_LOG_ENTRIES = 50;
 
@@ -30,6 +34,7 @@ export interface ObjectUrlApi {
   revokeObjectURL(url: string): void;
 }
 export interface DiagnosticDashboardOptions {
+  readonly annotationCorrelation?: AnnotationCorrelation;
   readonly recognition?: RecognitionStateStore;
   readonly camera?: CameraController;
   readonly stream?: FrameStreamController;
@@ -102,6 +107,9 @@ export class DiagnosticDashboard {
   private supportsAnnotations = false;
   private annotationUrl: string | null = null;
   private readonly objectUrls: ObjectUrlApi;
+  private readonly annotationCorrelation: AnnotationCorrelation;
+  private readonly handlesAnnotationEvents: boolean;
+  private readonly unsubscribeAnnotationCorrelation: () => void;
   private destroyed = false;
   private reconnectPending = false;
   private schedulerMetrics: SchedulerMetadata | null = null;
@@ -115,6 +123,10 @@ export class DiagnosticDashboard {
     private readonly options: DiagnosticDashboardOptions = {},
   ) {
     this.cameraState = this.options.camera?.getState() ?? null;
+    this.annotationCorrelation =
+      this.options.annotationCorrelation ?? new AnnotationCorrelation();
+    this.handlesAnnotationEvents =
+      this.options.annotationCorrelation === undefined;
     this.objectUrls = this.options.objectUrls ?? URL;
     this.streamState = this.options.stream?.getState() ?? null;
     this.adaptiveSnapshot = this.options.adaptive?.getSnapshot() ?? null;
@@ -199,6 +211,10 @@ export class DiagnosticDashboard {
     this.unsubscribe = this.client.subscribe((event) =>
       this.handleEvent(event),
     );
+    this.unsubscribeAnnotationCorrelation =
+      this.annotationCorrelation.subscribe((update) =>
+        this.applyAnnotationUpdate(update),
+      );
     this.unsubscribeCamera =
       this.options.camera?.subscribe((event) =>
         this.handleCameraEvent(event),
@@ -243,6 +259,8 @@ export class DiagnosticDashboard {
         recognition: null,
         announcedEventId: null,
         shouldAnnounce: false,
+        integrity: { kind: "omitted" },
+        lastAcceptedFrameSequence: null,
       },
     );
   }
@@ -251,6 +269,7 @@ export class DiagnosticDashboard {
     if (this.destroyed) return;
     this.destroyed = true;
     this.unsubscribe();
+    this.unsubscribeAnnotationCorrelation();
     this.unsubscribeCamera?.();
     this.unsubscribeStream?.();
     this.unsubscribeAdaptive?.();
@@ -261,6 +280,7 @@ export class DiagnosticDashboard {
     this.options.adaptiveQuality?.reset();
     this.options.adaptiveResolution?.reset();
     this.options.camera?.detachPreview();
+    this.annotationCorrelation.reset();
     this.clearAnnotation();
     this.root.replaceChildren();
   }
@@ -275,7 +295,26 @@ export class DiagnosticDashboard {
         : dash;
     const percent = (value: number | undefined): string =>
       value === undefined ? dash : `${(value * 100).toFixed(0)}%`;
-    this.recognitionDiagnostics.textContent = `Capability: ${snapshot.capabilityAvailable ? "Available" : "Unavailable"}; frame: ${item?.frame_sequence ?? dash}; hands: ${item?.hand_count ?? dash}; primary: ${label(item?.primary_hand?.handedness)} (${percent(item?.primary_hand?.confidence)}); candidate: ${label(item?.candidate?.gesture_id)} (${percent(item?.candidate?.confidence)}); reason: ${item?.candidate?.reason?.replace(/_/g, " ") ?? dash}; stable: ${label(item?.stable?.gesture_id)} (${percent(item?.stable?.confidence)}); confirmed: ${item?.stable?.confirmed_frames ?? dash}; duration: ${item?.stable?.since_ms ?? dash} ms; transition: ${label(item?.transition?.kind)}; previous: ${label(item?.transition?.previous_gesture)}; gesture: ${label(item?.transition?.gesture)}; event: ${item?.transition?.event_id ?? dash}.`;
+    const capability = snapshot.capabilityAvailable
+      ? item
+        ? "advertised; recognition available"
+        : "advertised; no current recognition result"
+      : snapshot.integrity.kind === "unadvertised" && item
+        ? "not advertised; recognition accepted defensively"
+        : "not advertised";
+    const integrity =
+      snapshot.integrity.kind === "malformed"
+        ? `malformed optional recognition (${snapshot.integrity.reason})`
+        : snapshot.integrity.kind === "unadvertised"
+          ? "valid recognition without advertised capability"
+          : snapshot.integrity.kind === "duplicate"
+            ? "duplicate sequence ignored"
+            : snapshot.integrity.kind === "stale"
+              ? "stale sequence ignored"
+              : snapshot.integrity.kind === "omitted"
+                ? "omitted by server"
+                : "valid";
+    this.recognitionDiagnostics.textContent = `Capability: ${capability}; integrity: ${integrity}; frame: ${item?.frame_sequence ?? dash}; hands: ${item?.hand_count ?? dash}; primary: ${label(item?.primary_hand?.handedness)} (${percent(item?.primary_hand?.confidence)}); candidate: ${label(item?.candidate?.gesture_id)} (${percent(item?.candidate?.confidence)}); reason: ${item?.candidate?.reason?.replace(/_/g, " ") ?? dash}; stable: ${label(item?.stable?.gesture_id)} (${percent(item?.stable?.confidence)}); confirmed: ${item?.stable?.confirmed_frames ?? dash}; duration: ${item?.stable?.since_ms ?? dash} ms; transition: ${label(item?.transition?.kind)}; previous: ${label(item?.transition?.previous_gesture)}; gesture: ${label(item?.transition?.gesture)}; event: ${item?.transition?.event_id ?? dash}.`;
     if (!snapshot.shouldAnnounce || !item?.transition) {
       if (!item) this.recognitionLive.textContent = "";
       return;
@@ -334,6 +373,7 @@ export class DiagnosticDashboard {
       if (event.state !== "OPEN") this.options.stream?.stop();
       if (event.state !== "OPEN") {
         this.supportsAnnotations = false;
+        this.annotationCorrelation.reset();
         this.clearAnnotation();
         this.schedulerMetrics = null;
         this.renderServerScheduler();
@@ -348,15 +388,20 @@ export class DiagnosticDashboard {
         event.message.type === "annotated_frame.set.ack" &&
         !event.message.enabled
       )
-        this.clearAnnotation();
+        this.applyAnnotationUpdate(
+          this.annotationCorrelation.clearPresentation(),
+        );
       if (event.message.type === "gesture.result") {
         this.schedulerMetrics = event.message.scheduler ?? null;
         this.renderServerScheduler();
+        if (this.handlesAnnotationEvents)
+          this.annotationCorrelation.acceptResult(event.message);
       }
       this.append(event.message.type, this.messageSummary(event.message));
       this.renderAnnotation();
     } else if (event.type === "annotated-frame") {
-      this.showAnnotation(event.frame);
+      if (this.handlesAnnotationEvents)
+        this.annotationCorrelation.acceptFrame(event.frame);
     } else if (event.type === "reconnect.scheduled") {
       this.reconnectPending = true;
       this.renderState(this.client.getState());
@@ -597,6 +642,10 @@ export class DiagnosticDashboard {
     this.annotationStatus.textContent = "Annotation feedback: frame available";
     this.element<HTMLParagraphElement>(".annotation-diagnostics").textContent =
       `Sequence ${frame.sequence}; ${frame.width}×${frame.height}; ${frame.size} bytes.`;
+  }
+  private applyAnnotationUpdate(update: AnnotationCorrelationUpdate): void {
+    if (update.kind === "frame") this.showAnnotation(update.frame);
+    else if (update.kind === "clear") this.clearAnnotation();
   }
   private clearAnnotation(): void {
     if (this.annotationUrl) this.objectUrls.revokeObjectURL(this.annotationUrl);

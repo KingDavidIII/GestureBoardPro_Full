@@ -1,5 +1,7 @@
 """Channels integration tests for the versioned gesture protocol."""
 
+import json
+from pathlib import Path
 from unittest.mock import patch
 
 from channels.testing import WebsocketCommunicator
@@ -12,6 +14,18 @@ from gestureboard.services.websocket_runtime_bridge import (
     WebSocketRuntimeBridgeStage,
 )
 from gestureboard.websocket.consumers import GestureConsumer
+
+
+def shared_error_fixtures() -> list[dict[str, object]]:
+    path = (
+        Path(__file__).resolve().parents[3]
+        / "contracts"
+        / "gesture-protocol"
+        / "v1"
+        / "fixtures"
+        / "server-error-messages.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 class FakeBridge:
@@ -69,6 +83,21 @@ async def connected(bridge: FakeBridge):
 
 
 class GestureConsumerTests(SimpleTestCase):
+    def test_shared_error_fixtures_match_backend_vocabulary_and_shape(self) -> None:
+        fixtures = shared_error_fixtures()
+        codes = {item["error"]["code"] for item in fixtures}  # type: ignore[index]
+        self.assertEqual(codes, {code.value for code in WebSocketProtocolErrorCode})
+        self.assertEqual(len(fixtures), len(codes))
+        for fixture in fixtures:
+            self.assertEqual(fixture["protocol_version"], 1)
+            self.assertEqual(fixture["type"], "error")
+            error = fixture["error"]
+            self.assertIsInstance(error, dict)
+            self.assertIn(error["code"], codes)  # type: ignore[index]
+            self.assertIsInstance(error["message"], str)  # type: ignore[index]
+            if "request_id" in fixture:
+                self.assertIsInstance(fixture["request_id"], str)
+
     async def test_route_binary_result_and_disconnect_cleanup(self) -> None:
         bridge = FakeBridge()
         communicator, factory = await connected(bridge)

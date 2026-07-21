@@ -10,7 +10,9 @@ export type ProtocolErrorCode =
   | "frame_too_large"
   | "runtime_failure"
   | "reset_failure"
-  | "internal_error";
+  | "internal_error"
+  | "invalid_annotation_control"
+  | "annotation_encoding_failed";
 
 export type HandSelectionDecision =
   | "NO_HANDS"

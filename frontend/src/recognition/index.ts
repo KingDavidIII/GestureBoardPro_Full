@@ -3,6 +3,7 @@ export {
   RecognitionStateStore,
 } from "./recognition-state";
 export type {
+  RecognitionIntegrityState,
   RecognitionState,
   RecognitionStateListener,
 } from "./recognition-state";

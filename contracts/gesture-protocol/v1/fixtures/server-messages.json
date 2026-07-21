@@ -1,0 +1,116 @@
+[
+  {
+    "name": "connection-ready",
+    "message": {
+      "protocol_version": 1,
+      "type": "connection.ready",
+      "capabilities": ["annotated_frame.jpeg.v1", "gesture.recognition.v1"]
+    }
+  },
+  {
+    "name": "gesture-result-legacy",
+    "message": {
+      "protocol_version": 1,
+      "type": "gesture.result",
+      "sequence": 7,
+      "timestamp": 1000.25,
+      "detected_hand_count": 0,
+      "selection": { "decision": "NO_HANDS", "identity": null },
+      "hand": null,
+      "gesture": { "label": null, "engine_decision": "NO_HAND" },
+      "action_executed": false,
+      "dispatch": null
+    }
+  },
+  {
+    "name": "gesture-result-scheduler",
+    "message": {
+      "protocol_version": 1,
+      "type": "gesture.result",
+      "sequence": 8,
+      "timestamp": 1001.5,
+      "detected_hand_count": 1,
+      "selection": {
+        "decision": "FIRST_DETECTED",
+        "identity": { "hand_index": 0, "handedness": "Right" }
+      },
+      "hand": { "index": 0, "handedness": "Right", "detection_confidence": 0.95 },
+      "gesture": { "label": "OPEN_PALM", "engine_decision": "ACTIVATED" },
+      "action_executed": true,
+      "dispatch": { "gesture_label": "OPEN_PALM", "action_kind": "TAP_KEY", "executed": true },
+      "scheduler": {
+        "received_frames": 9,
+        "processed_frames": 8,
+        "dropped_frames": 1,
+        "processing_failures": 0,
+        "pending_frames": 0,
+        "queue_delay_ms": 1.25,
+        "processing_time_ms": 8.5
+      }
+    }
+  },
+  {
+    "name": "gesture-result-recognition",
+    "message": {
+      "protocol_version": 1,
+      "type": "gesture.result",
+      "sequence": 9,
+      "timestamp": 1002.75,
+      "detected_hand_count": 1,
+      "selection": {
+        "decision": "HIGHEST_CONFIDENCE",
+        "identity": { "hand_index": 0, "handedness": "Right" }
+      },
+      "hand": { "index": 0, "handedness": "Right", "detection_confidence": 0.98 },
+      "gesture": { "label": "PINCH", "engine_decision": "ACTIVATED" },
+      "action_executed": true,
+      "dispatch": { "gesture_label": "PINCH", "action_kind": "TAP_KEY", "executed": true },
+      "recognition": {
+        "schema_version": 1,
+        "frame_sequence": 9,
+        "hand_count": 1,
+        "primary_hand": { "handedness": "right", "confidence": 0.98 },
+        "candidate": { "gesture_id": "pinch", "confidence": 0.85, "reason": "isolated_thumb_index_contact" },
+        "stable": { "gesture_id": "pinch", "confidence": 0.85, "confirmed_frames": 3, "since_ms": 120 },
+        "transition": { "event_id": 4, "kind": "activated", "previous_gesture": null, "gesture": "pinch", "confidence": 0.85 }
+      }
+    }
+  },
+  {
+    "name": "gesture-result-annotation",
+    "message": {
+      "protocol_version": 1,
+      "type": "gesture.result",
+      "sequence": 10,
+      "timestamp": 1003,
+      "detected_hand_count": 0,
+      "selection": { "decision": "NO_HANDS", "identity": null },
+      "hand": null,
+      "gesture": { "label": null, "engine_decision": "NO_HAND" },
+      "action_executed": false,
+      "dispatch": null,
+      "annotation": {
+        "enabled": true,
+        "available": true,
+        "format": "jpeg",
+        "envelope_version": 1,
+        "sequence": 10,
+        "width": 640,
+        "height": 480,
+        "byte_length": 2048
+      }
+    }
+  },
+  {
+    "name": "pong",
+    "message": { "protocol_version": 1, "type": "pong", "request_id": "fixture-ping-1" }
+  },
+  {
+    "name": "runtime-reset-ack",
+    "message": { "protocol_version": 1, "type": "runtime.reset.ack", "request_id": "fixture-reset-1" }
+  },
+  {
+    "name": "annotated-frame-set-ack",
+    "message": { "protocol_version": 1, "type": "annotated_frame.set.ack", "enabled": true, "request_id": "fixture-annotation-1" }
+  }
+]

@@ -31,6 +31,16 @@ export class FrontendProtocolError extends Error {
   }
 }
 
+export type RecognitionIntegrity =
+  | { readonly kind: "omitted" }
+  | { readonly kind: "valid" }
+  | { readonly kind: "malformed"; readonly reason: string };
+
+export interface ServerMessageValidation {
+  readonly message: ServerMessage;
+  readonly recognitionIntegrity?: RecognitionIntegrity;
+}
+
 const labels = new Set<GestureLabel>([
   "UNKNOWN",
   "OPEN_PALM",
@@ -72,6 +82,8 @@ const errorCodes = new Set<ProtocolErrorCode>([
   "runtime_failure",
   "reset_failure",
   "internal_error",
+  "invalid_annotation_control",
+  "annotation_encoding_failed",
 ]);
 const recognitionGestures = new Set<GestureIdentifier>([
   "open_palm",
@@ -218,7 +230,7 @@ function validateRecognition(value: unknown): void {
 
 function validateGestureResult(
   value: Record<string, unknown>,
-): GestureResultMessage {
+): ServerMessageValidation {
   const selection = value.selection;
   const gesture = value.gesture;
   if (!nonNegativeInteger(value.sequence) || !finite(value.timestamp))
@@ -286,14 +298,32 @@ function validateGestureResult(
     )
       invalid("Invalid scheduler metadata.");
   }
-  if (value.recognition !== undefined && value.recognition !== null) {
+  if (value.recognition === undefined)
+    return {
+      message: value as unknown as GestureResultMessage,
+      recognitionIntegrity: { kind: "omitted" },
+    };
+  if (value.recognition !== null) {
     try {
       validateRecognition(value.recognition);
-    } catch {
-      return { ...value, recognition: null } as unknown as GestureResultMessage;
+    } catch (error) {
+      const message = Object.fromEntries(
+        Object.entries(value).filter(([key]) => key !== "recognition"),
+      );
+      return {
+        message: message as unknown as GestureResultMessage,
+        recognitionIntegrity: {
+          kind: "malformed",
+          reason:
+            error instanceof Error ? error.message : "Invalid recognition.",
+        },
+      };
     }
   }
-  return value as unknown as GestureResultMessage;
+  return {
+    message: value as unknown as GestureResultMessage,
+    recognitionIntegrity: { kind: "valid" },
+  };
 }
 
 export function validateServerMessage(value: unknown): ServerMessage {
@@ -317,7 +347,7 @@ export function validateServerMessage(value: unknown): ServerMessage {
         invalid("Invalid capabilities.");
       return value as unknown as ServerMessage;
     case "gesture.result":
-      return validateGestureResult(value);
+      return validateGestureResult(value).message;
     case "pong":
     case "runtime.reset.ack":
       if (!optionalRequestId(value.request_id)) invalid("Invalid request_id.");
@@ -347,6 +377,21 @@ export function validateServerMessage(value: unknown): ServerMessage {
   }
 }
 
+export function validateServerMessageWithDiagnostics(
+  value: unknown,
+): ServerMessageValidation {
+  if (!record(value)) invalid("Server message must be an object.");
+  if (value.protocol_version !== 1) {
+    throw new FrontendProtocolError(
+      FrontendProtocolErrorCode.UNSUPPORTED_PROTOCOL_VERSION,
+      "Unsupported protocol version.",
+    );
+  }
+  if (typeof value.type !== "string") invalid("Message type is required.");
+  if (value.type === "gesture.result") return validateGestureResult(value);
+  return { message: validateServerMessage(value) };
+}
+
 export function parseServerMessage(text: string): ServerMessage {
   let value: unknown;
   try {
@@ -359,4 +404,20 @@ export function parseServerMessage(text: string): ServerMessage {
     );
   }
   return validateServerMessage(value);
+}
+
+export function parseServerMessageWithDiagnostics(
+  text: string,
+): ServerMessageValidation {
+  let value: unknown;
+  try {
+    value = JSON.parse(text) as unknown;
+  } catch (error) {
+    throw new FrontendProtocolError(
+      FrontendProtocolErrorCode.INVALID_JSON,
+      "Server message is not valid JSON.",
+      { cause: error },
+    );
+  }
+  return validateServerMessageWithDiagnostics(value);
 }

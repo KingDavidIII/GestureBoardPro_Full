@@ -1,7 +1,7 @@
 import {
   PROTOCOL_VERSION,
   decodeAnnotatedFrameEnvelope,
-  parseServerMessage,
+  parseServerMessageWithDiagnostics,
 } from "../protocol";
 import type {
   AnnotatedFrameMessage,
@@ -319,12 +319,21 @@ export class GestureWebSocketClient {
       return;
     }
     try {
-      const message = parseServerMessage(data);
+      const validated = parseServerMessageWithDiagnostics(data);
+      const message = validated.message;
       if (!this.current(epoch)) return;
       this.lastMessage = message;
       if (message.type === "annotated_frame.set.ack")
         this.annotatedFramesEnabled = message.enabled;
-      this.emit(Object.freeze({ type: "protocol.message", message }));
+      this.emit(
+        Object.freeze({
+          type: "protocol.message" as const,
+          message,
+          ...(validated.recognitionIntegrity
+            ? { recognitionIntegrity: validated.recognitionIntegrity }
+            : {}),
+        }),
+      );
     } catch (error) {
       const code =
         typeof error === "object" &&

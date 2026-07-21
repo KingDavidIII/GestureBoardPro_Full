@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
+import errorFixtures from "../../contracts/gesture-protocol/v1/fixtures/server-error-messages.json";
+import serverFixtures from "../../contracts/gesture-protocol/v1/fixtures/server-messages.json";
+
 import {
   GestureWebSocketClient,
   GestureWebSocketClientError,
@@ -124,6 +127,55 @@ function resilientClient(
 }
 
 describe("GestureWebSocketClient", () => {
+  it("delivers every shared server fixture as a protocol message", async () => {
+    const [client, socket] = createClient();
+    const received: GestureWebSocketClientEvent[] = [];
+    client.subscribe((event) => received.push(event));
+    await connectClient(client, socket);
+
+    for (const fixture of serverFixtures)
+      socket.message(JSON.stringify(fixture.message));
+
+    const messages = received.filter(
+      (
+        event,
+      ): event is Extract<
+        GestureWebSocketClientEvent,
+        { type: "protocol.message" }
+      > => event.type === "protocol.message",
+    );
+    expect(messages.map((event) => event.message)).toEqual(
+      serverFixtures.map((fixture) => fixture.message),
+    );
+  });
+
+  it("delivers every supported backend error fixture as a protocol message", async () => {
+    const [client, socket] = createClient();
+    const received: GestureWebSocketClientEvent[] = [];
+    client.subscribe((event) => received.push(event));
+    await connectClient(client, socket);
+
+    for (const fixture of errorFixtures)
+      socket.message(JSON.stringify(fixture));
+
+    const messages = received.filter(
+      (
+        event,
+      ): event is Extract<
+        GestureWebSocketClientEvent,
+        { type: "protocol.message" }
+      > => event.type === "protocol.message",
+    );
+    expect(messages.map((event) => event.message)).toEqual(errorFixtures);
+    expect(
+      received.some(
+        (event) =>
+          event.type === "protocol.error" &&
+          event.error.code ===
+            GestureWebSocketClientErrorCode.INVALID_PROTOCOL_MESSAGE,
+      ),
+    ).toBe(false);
+  });
   it("sends annotation controls only while open and confirms state on acknowledgement", async () => {
     const [client, socket] = createClient();
 
@@ -232,6 +284,39 @@ describe("GestureWebSocketClient", () => {
 
     expect(errors).toHaveLength(1);
     expect(errors[0]?.code).toBe(GestureWebSocketClientErrorCode.INVALID_JSON);
+  });
+
+  it("delivers malformed optional recognition as a non-fatal protocol diagnostic", async () => {
+    const [client, socket] = createClient();
+    const received: GestureWebSocketClientEvent[] = [];
+    client.subscribe((event) => received.push(event));
+    await connectClient(client, socket);
+
+    socket.message(
+      JSON.stringify({
+        protocol_version: 1,
+        type: "gesture.result",
+        sequence: 4,
+        timestamp: 1.5,
+        detected_hand_count: 0,
+        selection: { decision: "NO_HANDS", identity: null },
+        hand: null,
+        gesture: { label: null, engine_decision: "NO_HAND" },
+        action_executed: false,
+        dispatch: null,
+        recognition: { schema_version: 1, frame_sequence: -1 },
+      }),
+    );
+
+    expect(received).toContainEqual(
+      expect.objectContaining({
+        type: "protocol.message",
+        recognitionIntegrity: expect.objectContaining({ kind: "malformed" }),
+      }),
+    );
+    expect(received.some((event) => event.type === "protocol.error")).toBe(
+      false,
+    );
   });
 
   it("emits and retains valid annotated frames with monotonic sequence handling", async () => {
