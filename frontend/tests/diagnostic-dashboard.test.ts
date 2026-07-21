@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CameraState, type CameraController } from "../src/camera";
+import {
+  CameraError,
+  CameraErrorCode,
+  CameraState,
+  type CameraController,
+} from "../src/camera";
 import { DiagnosticDashboard, type ObjectUrlApi } from "../src/dashboard";
 import { RecognitionStateStore } from "../src/recognition";
 import {
@@ -61,6 +66,7 @@ describe("DiagnosticDashboard", () => {
   let client: GestureWebSocketClient;
   let createObjectURL: ReturnType<typeof vi.fn<(blob: Blob) => string>>;
   let revokeObjectURL: ReturnType<typeof vi.fn<(url: string) => void>>;
+  let cameraStart: ReturnType<typeof vi.fn>;
   let cameraStop: ReturnType<typeof vi.fn>;
   let streamStop: ReturnType<typeof vi.fn>;
   let cameraDetach: ReturnType<typeof vi.fn>;
@@ -105,6 +111,12 @@ describe("DiagnosticDashboard", () => {
       return `blob:annotation-${objectUrlSequence}`;
     });
     revokeObjectURL = vi.fn();
+    cameraStart = vi.fn(async () => ({
+      width: null,
+      height: null,
+      frameRate: null,
+      facingMode: null,
+    }));
     cameraStop = vi.fn();
     cameraDetach = vi.fn();
     streamStop = vi.fn(() => {
@@ -143,12 +155,7 @@ describe("DiagnosticDashboard", () => {
       getMetadata: () => null,
       attachPreview: vi.fn(async () => undefined),
       detachPreview: cameraDetach,
-      start: vi.fn(async () => ({
-        width: null,
-        height: null,
-        frameRate: null,
-        facingMode: null,
-      })),
+      start: cameraStart,
       stop: cameraStop,
       subscribe: vi.fn(() => vi.fn()),
     } as unknown as CameraController;
@@ -334,6 +341,25 @@ describe("DiagnosticDashboard", () => {
 
     expect(status?.textContent).toContain("OPEN");
     expect(ping?.disabled).toBe(false);
+  });
+
+  it("does not report a manually cancelled camera start as a failure", async () => {
+    cameraStart.mockRejectedValueOnce(
+      new CameraError(
+        CameraErrorCode.CAMERA_START_CANCELLED,
+        "Camera start was cancelled.",
+      ),
+    );
+
+    root
+      .querySelector<HTMLButtonElement>('[data-action="start-camera"]')
+      ?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(root.querySelector(".message-log")?.textContent).not.toContain(
+      "Camera failed",
+    );
   });
 
   it("shows received protocol messages in the log", async () => {

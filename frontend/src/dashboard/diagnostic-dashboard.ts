@@ -1,4 +1,6 @@
 import {
+  CameraError,
+  CameraErrorCode,
   CameraState,
   type CameraController,
   type CameraEvent,
@@ -362,7 +364,13 @@ export class DiagnosticDashboard {
     try {
       await this.options.camera?.start();
     } catch (error) {
-      this.append("Camera failed", this.errorMessage(error));
+      if (
+        error instanceof CameraError &&
+        error.code === CameraErrorCode.CAMERA_START_CANCELLED
+      )
+        return;
+      if (!this.destroyed)
+        this.append("Camera failed", this.errorMessage(error));
     }
   }
   private stopCamera(): void {
