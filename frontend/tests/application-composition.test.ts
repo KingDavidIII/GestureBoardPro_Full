@@ -33,6 +33,55 @@ const gestureResult = (
 });
 
 describe("recognition application composition", () => {
+  it("routes annotation metadata, frames, and epoch resets to one correlator", () => {
+    const store = new RecognitionStateStore();
+    const correlation = {
+      results: [] as unknown[],
+      frames: [] as unknown[],
+      resets: 0,
+      acceptResult(message: unknown): void {
+        this.results.push(message);
+      },
+      acceptFrame(frame: unknown): void {
+        this.frames.push(frame);
+      },
+      reset(): void {
+        this.resets += 1;
+      },
+    };
+    const composition = createRecognitionEventComposition(store, correlation);
+    const message = {
+      ...gestureResult(),
+      annotation: {
+        enabled: true,
+        available: true,
+        format: "jpeg" as const,
+        envelope_version: 1,
+        sequence: 1,
+        width: 640,
+        height: 480,
+        byte_length: 3,
+      },
+    };
+    const frame = {
+      sequence: 1,
+      width: 640,
+      height: 480,
+      size: 3,
+      mimeType: "image/jpeg" as const,
+      blob: new Blob([new Uint8Array([1, 2, 3])], { type: "image/jpeg" }),
+    };
+    composition.handleSocketEvent({ type: "protocol.message", message });
+    composition.handleSocketEvent({ type: "annotated-frame", frame });
+    composition.handleSocketEvent({
+      type: "state.changed",
+      state: WebSocketClientState.CLOSED,
+    });
+    expect(correlation.results).toEqual([message]);
+    expect(correlation.frames).toEqual([frame]);
+    expect(correlation.resets).toBe(1);
+  });
+
   it("routes validated capability and result messages through one epoch", () => {
     const store = new RecognitionStateStore();
     const composition = createRecognitionEventComposition(store);

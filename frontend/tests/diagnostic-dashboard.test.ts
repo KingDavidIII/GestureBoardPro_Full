@@ -273,6 +273,30 @@ describe("DiagnosticDashboard", () => {
         if (event.type === "annotated-frame") acceptedBlob = event.frame.blob;
       },
     );
+    socket.message(
+      JSON.stringify({
+        protocol_version: 1,
+        type: "gesture.result",
+        sequence,
+        timestamp: 0,
+        detected_hand_count: 0,
+        selection: { decision: "NO_HANDS", identity: null },
+        hand: null,
+        gesture: { label: null, engine_decision: "NO_HAND" },
+        action_executed: false,
+        dispatch: null,
+        annotation: {
+          enabled: true,
+          available: true,
+          format: "jpeg",
+          envelope_version: 1,
+          sequence,
+          width,
+          height,
+          byte_length: bytes.length,
+        },
+      }),
+    );
     socket.message(annotatedEnvelope(sequence, width, height, bytes));
     await Promise.resolve();
     await Promise.resolve();
@@ -400,6 +424,39 @@ describe("DiagnosticDashboard", () => {
     expect(annotationDiagnostics()).toContain("640×360");
     expect(annotationDiagnostics()).toContain("4 bytes");
     expect(annotationStatus()).toContain("frame available");
+  });
+
+  it("does not create an object URL for inconsistent annotation metadata", async () => {
+    await connectAndEnableAnnotations();
+    socket.message(
+      JSON.stringify({
+        protocol_version: 1,
+        type: "gesture.result",
+        sequence: 12,
+        timestamp: 0,
+        detected_hand_count: 0,
+        selection: { decision: "NO_HANDS", identity: null },
+        hand: null,
+        gesture: { label: null, engine_decision: "NO_HAND" },
+        action_executed: false,
+        dispatch: null,
+        annotation: {
+          enabled: true,
+          available: true,
+          format: "jpeg",
+          envelope_version: 1,
+          sequence: 12,
+          width: 640,
+          height: 480,
+          byte_length: 4,
+        },
+      }),
+    );
+    socket.message(annotatedEnvelope(12, 640, 480, [1, 2, 3]));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(annotationImage().hasAttribute("src")).toBe(false);
   });
 
   it("replaces a frame after revoking only its stale object URL", async () => {
@@ -989,6 +1046,89 @@ it("renders safe separate bandwidth and adaptive-resolution diagnostics", () => 
 });
 
 describe("recognition dashboard rendering", () => {
+  it("distinguishes capability and integrity states without losing accepted recognition", () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const client = new GestureWebSocketClient("ws://example.test/ws/", {
+      socketFactory: () => new FakeWebSocket(),
+    });
+    const recognition = new RecognitionStateStore();
+    recognition.beginEpoch(1);
+    const dashboard = new DiagnosticDashboard(root, client, { recognition });
+    const diagnostics = () =>
+      root.querySelector(".recognition-diagnostics")?.textContent ?? "";
+
+    expect(diagnostics()).toContain("Capability: not advertised");
+    recognition.setCapabilityAvailable(true, 1);
+    expect(diagnostics()).toContain(
+      "Capability: advertised; no current recognition result",
+    );
+    recognition.applyRecognition(
+      {
+        schema_version: 1,
+        frame_sequence: 5,
+        hand_count: 0,
+        primary_hand: null,
+        candidate: null,
+        stable: null,
+        transition: null,
+      },
+      1,
+      { kind: "valid" },
+    );
+    expect(diagnostics()).toContain(
+      "Capability: advertised; recognition available; integrity: valid",
+    );
+    recognition.applyRecognition(undefined, 1, {
+      kind: "malformed",
+      reason: "Invalid recognition metadata.",
+    });
+    expect(diagnostics()).toContain(
+      "integrity: malformed optional recognition (Invalid recognition metadata.)",
+    );
+    expect(diagnostics()).toContain("frame: 5");
+    recognition.applyRecognition(
+      {
+        schema_version: 1,
+        frame_sequence: 4,
+        hand_count: 0,
+        primary_hand: null,
+        candidate: null,
+        stable: null,
+        transition: null,
+      },
+      1,
+      { kind: "valid" },
+    );
+    expect(diagnostics()).toContain(
+      "integrity: stale sequence ignored; frame: 5",
+    );
+    recognition.beginEpoch(2);
+    expect(diagnostics()).toContain("integrity: omitted by server");
+    recognition.applyRecognition(
+      {
+        schema_version: 1,
+        frame_sequence: 1,
+        hand_count: 0,
+        primary_hand: null,
+        candidate: null,
+        stable: null,
+        transition: null,
+      },
+      2,
+      { kind: "valid" },
+      true,
+    );
+    expect(diagnostics()).toContain(
+      "Capability: not advertised; recognition accepted defensively",
+    );
+    expect(diagnostics()).toContain(
+      "integrity: valid recognition without advertised capability",
+    );
+    dashboard.destroy();
+    root.remove();
+  });
+
   it("renders immutable recognition state as plain text and announces once", () => {
     const root = document.createElement("div");
     document.body.append(root);
@@ -1030,7 +1170,7 @@ describe("recognition dashboard rendering", () => {
     const text =
       root.querySelector(".recognition-diagnostics")?.textContent ?? "";
     expect(root.textContent).toContain("Gesture recognition");
-    expect(text).toContain("Capability: Available");
+    expect(text).toContain("Capability: advertised; recognition available");
     expect(text).toContain("frame: 7");
     expect(text).toContain("Open Palm");
     expect(text).toContain("0%");
@@ -1069,9 +1209,12 @@ describe("recognition dashboard rendering", () => {
       1,
       { kind: "valid" },
     );
-    expect(root.querySelector(".recognition-diagnostics")?.textContent).toBe(
-      text,
-    );
+    expect(
+      root.querySelector(".recognition-diagnostics")?.textContent,
+    ).toContain("integrity: duplicate sequence ignored");
+    expect(
+      root.querySelector(".recognition-diagnostics")?.textContent,
+    ).toContain("frame: 7");
     expect(root.querySelector(".recognition-live")?.textContent).toBe(
       "Open Palm activated",
     );
