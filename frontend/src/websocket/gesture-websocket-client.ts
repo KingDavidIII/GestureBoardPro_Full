@@ -3,6 +3,10 @@ import {
   decodeAnnotatedFrameEnvelope,
   parseServerMessageWithDiagnostics,
 } from "../protocol";
+import {
+  releaseResourceOperations,
+  type ResourceCleanupOperation,
+} from "../lifecycle/resource-cleanup";
 import type {
   AnnotatedFrameMessage,
   ClientControlMessage,
@@ -85,6 +89,7 @@ interface ActiveConnection {
 const OPEN = 1;
 const MAXIMUM_REQUEST_ID_LENGTH = 128;
 const DEFAULT_MAXIMUM_FRAME_SIZE = 5 * 1024 * 1024;
+const SOCKET_EVENT_TYPES = ["open", "message", "error", "close"] as const;
 
 export class GestureWebSocketClient {
   readonly url: string;
@@ -104,6 +109,7 @@ export class GestureWebSocketClient {
   private epoch = 0;
   private retryAttempts = 0;
   private reconnectTimer: unknown | null = null;
+  private reconnectGeneration = 0;
   private intentionalDisconnect = false;
   private disposed = false;
 
@@ -157,37 +163,21 @@ export class GestureWebSocketClient {
   }
 
   disconnect(): void {
-    if (
-      this.intentionalDisconnect &&
-      !this.active &&
-      this.reconnectTimer === null
-    )
-      return;
-    this.intentionalDisconnect = true;
-    this.cancelReconnect("Manually disconnected");
-    this.resetConnectionEpoch();
-    const connection = this.active;
-    if (connection) {
-      this.setState(WebSocketClientState.CLOSING);
-      this.detach(connection);
-      this.active = null;
-      this.epoch += 1;
-      connection.reject(
-        this.clientError(
-          GestureWebSocketClientErrorCode.CONNECTION_CLOSED,
-          "Connection was manually closed.",
-        ),
-      );
-      connection.socket.close(1000, "Client disconnect");
-    }
-    this.setState(WebSocketClientState.CLOSED);
+    if (!this.requiresDisconnect()) return;
+    releaseResourceOperations(
+      "GestureWebSocketClient.disconnect",
+      this.prepareDisconnectOperations(),
+    );
   }
 
   destroy(): void {
     if (this.disposed) return;
-    this.disconnect();
     this.disposed = true;
-    this.listeners.clear();
+    const operations = this.requiresDisconnect()
+      ? this.prepareDisconnectOperations()
+      : [];
+    operations.push(["listeners.clear", () => this.listeners.clear()]);
+    releaseResourceOperations("GestureWebSocketClient.destroy", operations);
   }
 
   sendPing(requestId?: string): void {
@@ -228,6 +218,7 @@ export class GestureWebSocketClient {
     return this.latestAnnotatedFrame;
   }
   subscribe(listener: GestureWebSocketClientListener): () => void {
+    if (this.disposed) return () => undefined;
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
@@ -386,12 +377,19 @@ export class GestureWebSocketClient {
     closeSocket: boolean,
   ): void {
     if (!this.current(connection.epoch)) return;
-    this.detach(connection);
     this.active = null;
     this.resetConnectionEpoch();
-    connection.reject(error);
-    if (closeSocket) connection.socket.close();
-    if (!this.intentionalDisconnect && !this.disposed) this.scheduleReconnect();
+    const operations: ResourceCleanupOperation[] = [
+      ...this.detachOperations(connection),
+      ["connection.reject", () => connection.reject(error)],
+    ];
+    if (closeSocket)
+      operations.push(["socket.close", () => connection.socket.close()]);
+    operations.push(["reconnect.schedule", () => this.scheduleReconnect()]);
+    releaseResourceOperations(
+      "GestureWebSocketClient unexpected termination",
+      operations,
+    );
   }
 
   private scheduleReconnect(): void {
@@ -419,21 +417,33 @@ export class GestureWebSocketClient {
       this.random(),
     );
     this.retryAttempts = attempt;
-    this.reconnectTimer = this.reconnectTimers.set(() => {
+    const generation = ++this.reconnectGeneration;
+    let armed = false;
+    const handle = this.reconnectTimers.set(() => {
+      if (!armed || generation !== this.reconnectGeneration) return;
       this.reconnectTimer = null;
       if (this.intentionalDisconnect || this.disposed || this.active) return;
       const connection = this.startConnection(attempt);
       this.emit(Object.freeze({ type: "reconnect.started", attempt }));
       void connection.catch(() => undefined);
     }, delayMs);
+    this.reconnectTimer = handle;
+    armed = true;
     this.emit(Object.freeze({ type: "reconnect.scheduled", attempt, delayMs }));
   }
 
   private cancelReconnect(reason: string): void {
-    if (this.reconnectTimer === null) return;
-    this.reconnectTimers.clear(this.reconnectTimer);
+    const handle = this.reconnectTimer;
+    if (handle === null) return;
     this.reconnectTimer = null;
-    this.emit(Object.freeze({ type: "reconnect.cancelled", reason }));
+    this.reconnectGeneration += 1;
+    releaseResourceOperations("GestureWebSocketClient reconnect cancellation", [
+      ["reconnect.timer.clear", () => this.reconnectTimers.clear(handle)],
+      [
+        "reconnect.cancelled.emit",
+        () => this.emit(Object.freeze({ type: "reconnect.cancelled", reason })),
+      ],
+    ]);
   }
 
   private resetConnectionEpoch(): void {
@@ -559,12 +569,85 @@ export class GestureWebSocketClient {
   private current(epoch: number): ActiveConnection | null {
     return this.active?.epoch === epoch ? this.active : null;
   }
+
+  private requiresDisconnect(): boolean {
+    return !(
+      this.intentionalDisconnect &&
+      !this.active &&
+      this.reconnectTimer === null
+    );
+  }
+
+  private prepareDisconnectOperations(): ResourceCleanupOperation[] {
+    this.intentionalDisconnect = true;
+    const operations: ResourceCleanupOperation[] = [];
+    const reconnectTimer = this.reconnectTimer;
+    if (reconnectTimer !== null) {
+      this.reconnectTimer = null;
+      this.reconnectGeneration += 1;
+      operations.push(
+        [
+          "reconnect.timer.clear",
+          () => this.reconnectTimers.clear(reconnectTimer),
+        ],
+        [
+          "reconnect.cancelled.emit",
+          () =>
+            this.emit(
+              Object.freeze({
+                type: "reconnect.cancelled",
+                reason: "Manually disconnected",
+              }),
+            ),
+        ],
+      );
+    }
+
+    this.resetConnectionEpoch();
+    const connection = this.active;
+    if (connection) {
+      this.active = null;
+      this.epoch += 1;
+      const error = this.clientError(
+        GestureWebSocketClientErrorCode.CONNECTION_CLOSED,
+        "Connection was manually closed.",
+      );
+      operations.push(
+        ["state.closing", () => this.setState(WebSocketClientState.CLOSING)],
+        ...this.detachOperations(connection),
+        ["connection.reject", () => connection.reject(error)],
+        [
+          "socket.close",
+          () => connection.socket.close(1000, "Client disconnect"),
+        ],
+      );
+    }
+
+    operations.push([
+      "state.closed",
+      () => this.setState(WebSocketClientState.CLOSED),
+    ]);
+    return operations;
+  }
+
   private attach(connection: ActiveConnection): void {
-    for (const type of ["open", "message", "error", "close"] as const)
+    for (const type of SOCKET_EVENT_TYPES)
       connection.socket.addEventListener(type, connection.handlers[type]);
   }
-  private detach(connection: ActiveConnection): void {
-    for (const type of ["open", "message", "error", "close"] as const)
-      connection.socket.removeEventListener(type, connection.handlers[type]);
+
+  private detachOperations(
+    connection: ActiveConnection,
+  ): ResourceCleanupOperation[] {
+    return SOCKET_EVENT_TYPES.map(
+      (type) =>
+        [
+          `socket.listener.${type}.remove`,
+          () =>
+            connection.socket.removeEventListener(
+              type,
+              connection.handlers[type],
+            ),
+        ] as const,
+    );
   }
 }

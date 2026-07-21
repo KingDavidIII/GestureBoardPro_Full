@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import errorFixtures from "../../contracts/gesture-protocol/v1/fixtures/server-error-messages.json";
 import serverFixtures from "../../contracts/gesture-protocol/v1/fixtures/server-messages.json";
 
+import { ResourceCleanupError } from "../src/lifecycle/resource-cleanup";
 import {
   GestureWebSocketClient,
   GestureWebSocketClientError,
@@ -86,6 +87,30 @@ class FakeReconnectTimers implements ReconnectTimerApi {
 
   get pendingCount(): number {
     return this.callbacks.size;
+  }
+}
+
+class FailingClearReconnectTimers extends FakeReconnectTimers {
+  override clear(handle: unknown): void {
+    this.cleared.push(handle);
+    throw new Error("timer clear failed");
+  }
+}
+
+class LifecycleFailureWebSocket extends FakeWebSocket {
+  readonly removalAttempts: string[] = [];
+  closeAttempts = 0;
+
+  override removeEventListener(type: string, listener: EventListener): void {
+    this.removalAttempts.push(type);
+    if (type === "message") throw new Error("message listener removal failed");
+    super.removeEventListener(type, listener);
+  }
+
+  override close(code?: number, reason?: string): void {
+    this.closeAttempts += 1;
+    super.close(code, reason);
+    throw new Error("socket close failed");
   }
 }
 
@@ -603,5 +628,155 @@ describe("GestureWebSocketClient", () => {
     await manual;
     expect(client.getState()).toBe(WebSocketClientState.OPEN);
     client.destroy();
+  });
+
+  it("completes one-shot destruction after listener and socket failures", async () => {
+    const socket = new LifecycleFailureWebSocket();
+    const client = new GestureWebSocketClient("ws://board.test/ws/", {
+      socketFactory: () => socket,
+    });
+    const events: GestureWebSocketClientEvent[] = [];
+    client.subscribe((event) => events.push(event));
+    const pending = client.connect();
+    const rejection = expect(pending).rejects.toMatchObject({
+      code: GestureWebSocketClientErrorCode.CONNECTION_CLOSED,
+    });
+
+    let cleanupError: unknown;
+    try {
+      client.destroy();
+    } catch (error) {
+      cleanupError = error;
+    }
+
+    await rejection;
+    expect(cleanupError).toBeInstanceOf(ResourceCleanupError);
+    expect(
+      (cleanupError as ResourceCleanupError).failures.map(
+        ({ operation }) => operation,
+      ),
+    ).toEqual(["socket.listener.message.remove", "socket.close"]);
+    expect(socket.removalAttempts).toEqual([
+      "open",
+      "message",
+      "error",
+      "close",
+    ]);
+    expect(socket.closeAttempts).toBe(1);
+    expect(client.getState()).toBe(WebSocketClientState.CLOSED);
+
+    const eventCount = events.length;
+    const lateSubscriber = vi.fn();
+    client.subscribe(lateSubscriber);
+    socket.open();
+    socket.message(
+      '{"protocol_version":1,"type":"pong","request_id":"destroyed"}',
+    );
+
+    expect(events).toHaveLength(eventCount);
+    expect(lateSubscriber).not.toHaveBeenCalled();
+    await expect(client.connect()).rejects.toMatchObject({
+      code: GestureWebSocketClientErrorCode.INVALID_STATE,
+    });
+    expect(() => client.destroy()).not.toThrow();
+    expect(socket.closeAttempts).toBe(1);
+  });
+
+  it("invalidates a reconnect callback when timer clearing fails", async () => {
+    const sockets: FakeWebSocket[] = [];
+    const timers = new FailingClearReconnectTimers();
+    const client = new GestureWebSocketClient("ws://board.test/ws/", {
+      socketFactory: () => {
+        const socket = new FakeWebSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      reconnectTimers: timers,
+      reconnectPolicy: {
+        initialDelayMs: 100,
+        maximumDelayMs: 100,
+        maximumAttempts: 2,
+        jitterRatio: 0,
+      },
+    });
+    const first = client.connect();
+    sockets[0]?.open();
+    await first;
+    sockets[0]?.error();
+    expect(timers.pendingCount).toBe(1);
+
+    let cleanupError: unknown;
+    try {
+      client.disconnect();
+    } catch (error) {
+      cleanupError = error;
+    }
+
+    expect(cleanupError).toBeInstanceOf(ResourceCleanupError);
+    expect(
+      (cleanupError as ResourceCleanupError).failures.map(
+        ({ operation }) => operation,
+      ),
+    ).toEqual(["reconnect.timer.clear"]);
+    expect(client.getState()).toBe(WebSocketClientState.CLOSED);
+
+    timers.runNext();
+    expect(timers.pendingCount).toBe(0);
+    expect(sockets).toHaveLength(1);
+    expect(client.getState()).toBe(WebSocketClientState.CLOSED);
+    expect(() => client.destroy()).not.toThrow();
+  });
+
+  it("schedules recovery after unexpected teardown operations fail", async () => {
+    const sockets: FakeWebSocket[] = [];
+    const timers = new FakeReconnectTimers();
+    const failingSocket = new LifecycleFailureWebSocket();
+    const client = new GestureWebSocketClient("ws://board.test/ws/", {
+      socketFactory: () => {
+        const socket =
+          sockets.length === 0 ? failingSocket : new FakeWebSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      reconnectTimers: timers,
+      reconnectPolicy: {
+        initialDelayMs: 100,
+        maximumDelayMs: 100,
+        maximumAttempts: 2,
+        jitterRatio: 0,
+      },
+    });
+    const pending = client.connect();
+    const rejection = expect(pending).rejects.toMatchObject({
+      code: GestureWebSocketClientErrorCode.CONNECTION_FAILED,
+    });
+
+    let cleanupError: unknown;
+    try {
+      failingSocket.error();
+    } catch (error) {
+      cleanupError = error;
+    }
+
+    await rejection;
+    expect(cleanupError).toBeInstanceOf(ResourceCleanupError);
+    expect(
+      (cleanupError as ResourceCleanupError).failures.map(
+        ({ operation }) => operation,
+      ),
+    ).toEqual(["socket.listener.message.remove", "socket.close"]);
+    expect(failingSocket.removalAttempts).toEqual([
+      "open",
+      "message",
+      "error",
+      "close",
+    ]);
+    expect(timers.pendingCount).toBe(1);
+    expect(client.getState()).toBe(WebSocketClientState.ERROR);
+
+    timers.runNext();
+    expect(sockets).toHaveLength(2);
+    expect(client.getState()).toBe(WebSocketClientState.CONNECTING);
+    expect(() => client.destroy()).not.toThrow();
   });
 });
