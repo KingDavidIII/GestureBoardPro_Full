@@ -1,0 +1,18 @@
+[
+  {
+    "name": "ping",
+    "message": { "protocol_version": 1, "type": "ping", "request_id": "fixture-ping-1" }
+  },
+  {
+    "name": "runtime-reset",
+    "message": { "protocol_version": 1, "type": "runtime.reset", "request_id": "fixture-reset-1" }
+  },
+  {
+    "name": "annotated-frame-enable",
+    "message": { "protocol_version": 1, "type": "annotated_frame.set", "enabled": true, "request_id": "fixture-annotation-1" }
+  },
+  {
+    "name": "annotated-frame-disable",
+    "message": { "protocol_version": 1, "type": "annotated_frame.set", "enabled": false, "request_id": "fixture-annotation-2" }
+  }
+]

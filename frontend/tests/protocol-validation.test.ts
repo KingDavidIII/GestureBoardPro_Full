@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import errorFixtures from "../../contracts/gesture-protocol/v1/fixtures/server-error-messages.json";
+import serverFixtures from "../../contracts/gesture-protocol/v1/fixtures/server-messages.json";
 
 import {
   FrontendProtocolError,
@@ -43,6 +44,65 @@ const scheduler = {
 };
 
 describe("protocol validation", () => {
+  it("accepts every shared v1 server fixture without changing safe fields", () => {
+    for (const fixture of serverFixtures)
+      expect(validateServerMessage(fixture.message)).toEqual(fixture.message);
+  });
+
+  it("keeps the server type, capability, and metadata vocabularies explicit", () => {
+    expect(
+      new Set(serverFixtures.map((fixture) => fixture.message.type)),
+    ).toEqual(
+      new Set([
+        "connection.ready",
+        "gesture.result",
+        "pong",
+        "runtime.reset.ack",
+        "annotated_frame.set.ack",
+      ]),
+    );
+    const ready = serverFixtures.find(
+      (fixture) => fixture.name === "connection-ready",
+    );
+    const scheduler = serverFixtures.find(
+      (fixture) => fixture.name === "gesture-result-scheduler",
+    );
+    const annotation = serverFixtures.find(
+      (fixture) => fixture.name === "gesture-result-annotation",
+    );
+    const recognition = serverFixtures.find(
+      (fixture) => fixture.name === "gesture-result-recognition",
+    );
+    expect(ready?.message.capabilities).toEqual([
+      "annotated_frame.jpeg.v1",
+      "gesture.recognition.v1",
+    ]);
+    expect(new Set(Object.keys(scheduler?.message.scheduler ?? {}))).toEqual(
+      new Set([
+        "received_frames",
+        "processed_frames",
+        "dropped_frames",
+        "processing_failures",
+        "pending_frames",
+        "queue_delay_ms",
+        "processing_time_ms",
+      ]),
+    );
+    expect(new Set(Object.keys(annotation?.message.annotation ?? {}))).toEqual(
+      new Set([
+        "enabled",
+        "available",
+        "format",
+        "envelope_version",
+        "sequence",
+        "width",
+        "height",
+        "byte_length",
+      ]),
+    );
+    expect(recognition?.message.recognition?.schema_version).toBe(1);
+  });
+
   it("accepts every shared v1 backend error fixture without changing safe fields", () => {
     for (const fixture of errorFixtures) {
       expect(validateServerMessage(fixture)).toEqual(fixture);
@@ -56,6 +116,11 @@ describe("protocol validation", () => {
         type: "error",
         error: { code: "future_error", message: "Unknown." },
       }),
+    ).toThrow(FrontendProtocolError);
+  });
+  it("rejects an unknown future server message type", () => {
+    expect(() =>
+      validateServerMessage({ protocol_version: 1, type: "future.message" }),
     ).toThrow(FrontendProtocolError);
   });
   it("accepts protocol version 1 server messages", () => {

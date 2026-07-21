@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import errorFixtures from "../../contracts/gesture-protocol/v1/fixtures/server-error-messages.json";
+import serverFixtures from "../../contracts/gesture-protocol/v1/fixtures/server-messages.json";
 
 import {
   GestureWebSocketClient,
@@ -126,6 +127,28 @@ function resilientClient(
 }
 
 describe("GestureWebSocketClient", () => {
+  it("delivers every shared server fixture as a protocol message", async () => {
+    const [client, socket] = createClient();
+    const received: GestureWebSocketClientEvent[] = [];
+    client.subscribe((event) => received.push(event));
+    await connectClient(client, socket);
+
+    for (const fixture of serverFixtures)
+      socket.message(JSON.stringify(fixture.message));
+
+    const messages = received.filter(
+      (
+        event,
+      ): event is Extract<
+        GestureWebSocketClientEvent,
+        { type: "protocol.message" }
+      > => event.type === "protocol.message",
+    );
+    expect(messages.map((event) => event.message)).toEqual(
+      serverFixtures.map((fixture) => fixture.message),
+    );
+  });
+
   it("delivers every supported backend error fixture as a protocol message", async () => {
     const [client, socket] = createClient();
     const received: GestureWebSocketClientEvent[] = [];
