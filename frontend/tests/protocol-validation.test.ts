@@ -7,6 +7,7 @@ import {
   FrontendProtocolErrorCode,
   parseServerMessage,
   validateServerMessage,
+  validateServerMessageWithDiagnostics,
 } from "../src/protocol";
 
 const result = (annotation?: unknown, scheduler?: unknown) => ({
@@ -88,6 +89,53 @@ describe("protocol validation", () => {
     });
 
     expect(message.type).toBe("gesture.result");
+  });
+
+  it("accepts valid optional recognition with a structured integrity result", () => {
+    const validated = validateServerMessageWithDiagnostics({
+      ...result(),
+      recognition: {
+        schema_version: 1,
+        frame_sequence: 4,
+        hand_count: 0,
+        primary_hand: null,
+        candidate: null,
+        stable: null,
+        transition: null,
+      },
+    });
+
+    expect(validated).toMatchObject({
+      recognitionIntegrity: { kind: "valid" },
+      message: { type: "gesture.result", recognition: { frame_sequence: 4 } },
+    });
+  });
+
+  it("distinguishes omitted recognition from malformed optional recognition", () => {
+    expect(validateServerMessageWithDiagnostics(result())).toMatchObject({
+      recognitionIntegrity: { kind: "omitted" },
+      message: result(),
+    });
+
+    const payload = {
+      ...result(undefined, scheduler),
+      recognition: { schema_version: 1, frame_sequence: -1 },
+    };
+    const validated = validateServerMessageWithDiagnostics(payload);
+
+    expect(validated).toMatchObject({
+      recognitionIntegrity: { kind: "malformed" },
+      message: {
+        type: "gesture.result",
+        sequence: 4,
+        scheduler,
+      },
+    });
+    expect("recognition" in validated.message).toBe(false);
+    expect(payload.recognition).toEqual({
+      schema_version: 1,
+      frame_sequence: -1,
+    });
   });
 
   it("accepts valid scheduler metadata and legacy results without it", () => {

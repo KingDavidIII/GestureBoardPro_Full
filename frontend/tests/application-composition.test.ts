@@ -16,6 +16,22 @@ const recognition: GestureRecognition = {
   transition: null,
 };
 
+const gestureResult = (
+  value: GestureRecognition | undefined = recognition,
+) => ({
+  protocol_version: 1 as const,
+  type: "gesture.result" as const,
+  sequence: 1,
+  timestamp: 0,
+  detected_hand_count: 0,
+  selection: { decision: "NO_HANDS" as const, identity: null },
+  hand: null,
+  gesture: { label: null, engine_decision: "NO_HAND" as const },
+  action_executed: false,
+  dispatch: null,
+  ...(value === undefined ? {} : { recognition: value }),
+});
+
 describe("recognition application composition", () => {
   it("routes validated capability and result messages through one epoch", () => {
     const store = new RecognitionStateStore();
@@ -88,5 +104,74 @@ describe("recognition application composition", () => {
       state: WebSocketClientState.CLOSED,
     });
     expect(store.getSnapshot().epoch).toBe(1);
+  });
+  it("accepts a restarted recognition sequence after reconnecting", () => {
+    const store = new RecognitionStateStore();
+    const composition = createRecognitionEventComposition(store);
+    composition.handleSocketEvent({
+      type: "protocol.message",
+      message: gestureResult({ ...recognition, frame_sequence: 5 }),
+      recognitionIntegrity: { kind: "valid" },
+    });
+    composition.handleSocketEvent({
+      type: "state.changed",
+      state: WebSocketClientState.CLOSED,
+    });
+    composition.handleSocketEvent({
+      type: "protocol.message",
+      message: gestureResult({ ...recognition, frame_sequence: 1 }),
+      recognitionIntegrity: { kind: "valid" },
+    });
+    expect(store.getSnapshot()).toMatchObject({
+      epoch: 1,
+      recognition: { frame_sequence: 1 },
+      lastAcceptedFrameSequence: 1,
+    });
+  });
+  it("accepts unadvertised recognition without changing capability availability", () => {
+    const store = new RecognitionStateStore();
+    const composition = createRecognitionEventComposition(store);
+    composition.handleSocketEvent({
+      type: "protocol.message",
+      message: gestureResult(),
+      recognitionIntegrity: { kind: "valid" },
+    });
+    expect(store.getSnapshot()).toMatchObject({
+      capabilityAvailable: false,
+      availability: "unavailable",
+      integrity: { kind: "unadvertised" },
+      recognition,
+    });
+  });
+  it("preserves accepted recognition for malformed and stale protocol results", () => {
+    const store = new RecognitionStateStore();
+    const composition = createRecognitionEventComposition(store);
+    composition.handleSocketEvent({
+      type: "protocol.message",
+      message: gestureResult({ ...recognition, frame_sequence: 2 }),
+      recognitionIntegrity: { kind: "valid" },
+    });
+    composition.handleSocketEvent({
+      type: "protocol.message",
+      message: gestureResult(undefined),
+      recognitionIntegrity: {
+        kind: "malformed",
+        reason: "invalid recognition",
+      },
+    });
+    expect(store.getSnapshot()).toMatchObject({
+      recognition: { frame_sequence: 2 },
+      integrity: { kind: "malformed" },
+    });
+    composition.handleSocketEvent({
+      type: "protocol.message",
+      message: gestureResult({ ...recognition, frame_sequence: 1 }),
+      recognitionIntegrity: { kind: "valid" },
+    });
+    expect(store.getSnapshot()).toMatchObject({
+      recognition: { frame_sequence: 2 },
+      integrity: { kind: "stale" },
+      shouldAnnounce: false,
+    });
   });
 });

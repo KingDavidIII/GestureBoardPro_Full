@@ -26,7 +26,13 @@ export function createRecognitionEventComposition(
             epoch,
           );
         else if (event.message.type === "gesture.result")
-          recognition.applyRecognition(event.message.recognition, epoch);
+          recognition.applyRecognition(
+            event.message.recognition,
+            epoch,
+            event.recognitionIntegrity,
+            Boolean(event.message.recognition) &&
+              !recognition.getSnapshot().capabilityAvailable,
+          );
       }
     },
     handleStreamEvent(event): void {

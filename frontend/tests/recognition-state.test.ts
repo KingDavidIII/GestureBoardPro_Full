@@ -94,6 +94,7 @@ describe("RecognitionStateStore", () => {
     expect(store.getSnapshot().recognition?.hand_count).toBe(0);
     const stable = {
       ...recognition(2),
+      frame_sequence: 5,
       stable: {
         gesture_id: "open_palm" as const,
         confidence: 0.7,
@@ -111,10 +112,113 @@ describe("RecognitionStateStore", () => {
   it("treats absent recognition as a clear without inventing a transition", () => {
     const store = new RecognitionStateStore();
     store.beginEpoch(1);
-    store.applyRecognition(recognition(1), 1);
+    store.applyRecognition({ ...recognition(1), frame_sequence: 5 }, 1);
     store.applyRecognition(undefined, 1);
     expect(store.getSnapshot()).toMatchObject({
       recognition: null,
+      shouldAnnounce: false,
+      lastAcceptedFrameSequence: 5,
+    });
+    store.applyRecognition({ ...recognition(2), frame_sequence: 4 }, 1, {
+      kind: "valid",
+    });
+    expect(store.getSnapshot()).toMatchObject({
+      recognition: null,
+      integrity: { kind: "stale" },
+      lastAcceptedFrameSequence: 5,
+      shouldAnnounce: false,
+    });
+  });
+  it("retains the sequence watermark when explicit null recognition clears state", () => {
+    const store = new RecognitionStateStore();
+    store.beginEpoch(1);
+    store.applyRecognition({ ...recognition(1), frame_sequence: 5 }, 1, {
+      kind: "valid",
+    });
+    store.applyRecognition(null, 1, { kind: "valid" });
+    store.applyRecognition({ ...recognition(2), frame_sequence: 4 }, 1, {
+      kind: "valid",
+    });
+    expect(store.getSnapshot()).toMatchObject({
+      recognition: null,
+      integrity: { kind: "stale" },
+      lastAcceptedFrameSequence: 5,
+      shouldAnnounce: false,
+    });
+  });
+  it("accepts only increasing frame sequences within an epoch", () => {
+    const store = new RecognitionStateStore();
+    store.beginEpoch(1);
+    store.applyRecognition({ ...recognition(1), frame_sequence: 4 }, 1, {
+      kind: "valid",
+    });
+    store.applyRecognition({ ...recognition(2), frame_sequence: 5 }, 1, {
+      kind: "valid",
+    });
+
+    expect(store.getSnapshot()).toMatchObject({
+      lastAcceptedFrameSequence: 5,
+      integrity: { kind: "valid" },
+      recognition: { frame_sequence: 5, transition: { event_id: 2 } },
+      shouldAnnounce: true,
+    });
+  });
+  it("records duplicate and stale recognition without regressing its snapshot or announcement", () => {
+    const store = new RecognitionStateStore();
+    const updates = vi.fn();
+    store.subscribe(updates);
+    store.beginEpoch(1);
+    store.applyRecognition({ ...recognition(2), frame_sequence: 5 }, 1, {
+      kind: "valid",
+    });
+    store.applyRecognition({ ...recognition(3), frame_sequence: 5 }, 1, {
+      kind: "valid",
+    });
+    expect(store.getSnapshot()).toMatchObject({
+      integrity: { kind: "duplicate" },
+      recognition: { frame_sequence: 5, transition: { event_id: 2 } },
+      shouldAnnounce: false,
+    });
+    store.applyRecognition({ ...recognition(1), frame_sequence: 4 }, 1, {
+      kind: "valid",
+    });
+    expect(store.getSnapshot()).toMatchObject({
+      integrity: { kind: "stale" },
+      recognition: { frame_sequence: 5, transition: { event_id: 2 } },
+      shouldAnnounce: false,
+    });
+    expect(updates).toHaveBeenCalledTimes(4);
+  });
+  it("permits sequence restart after a new epoch", () => {
+    const store = new RecognitionStateStore();
+    store.beginEpoch(1);
+    store.applyRecognition({ ...recognition(2), frame_sequence: 5 }, 1, {
+      kind: "valid",
+    });
+    store.beginEpoch(2);
+    store.applyRecognition({ ...recognition(1), frame_sequence: 1 }, 2, {
+      kind: "valid",
+    });
+    expect(store.getSnapshot()).toMatchObject({
+      epoch: 2,
+      lastAcceptedFrameSequence: 1,
+      recognition: { frame_sequence: 1, transition: { event_id: 1 } },
+    });
+  });
+  it("retains accepted recognition when an optional recognition payload is malformed", () => {
+    const store = new RecognitionStateStore();
+    store.beginEpoch(1);
+    store.applyRecognition(recognition(1), 1, { kind: "valid" });
+    store.applyRecognition(undefined, 1, {
+      kind: "malformed",
+      reason: "recognition.frame_sequence must be a safe integer.",
+    });
+    expect(store.getSnapshot()).toMatchObject({
+      integrity: {
+        kind: "malformed",
+        reason: "recognition.frame_sequence must be a safe integer.",
+      },
+      recognition: { frame_sequence: 4, transition: { event_id: 1 } },
       shouldAnnounce: false,
     });
   });

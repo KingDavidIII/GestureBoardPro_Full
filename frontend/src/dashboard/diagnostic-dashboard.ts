@@ -223,9 +223,13 @@ export class DiagnosticDashboard {
         this.renderResolution();
       }) ?? null;
     this.unsubscribeRecognition =
-      this.options.recognition?.subscribe((snapshot) =>
-        this.renderRecognition(snapshot),
-      ) ?? null;
+      this.options.recognition?.subscribe((snapshot) => {
+        if (
+          snapshot.integrity.kind !== "duplicate" &&
+          snapshot.integrity.kind !== "stale"
+        )
+          this.renderRecognition(snapshot);
+      }) ?? null;
     if (this.options.camera) void this.options.camera.attachPreview(this.video);
     this.renderState(this.client.getState());
     this.renderCamera();
@@ -243,6 +247,8 @@ export class DiagnosticDashboard {
         recognition: null,
         announcedEventId: null,
         shouldAnnounce: false,
+        integrity: { kind: "omitted" },
+        lastAcceptedFrameSequence: null,
       },
     );
   }

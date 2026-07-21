@@ -263,6 +263,39 @@ describe("GestureWebSocketClient", () => {
     expect(errors[0]?.code).toBe(GestureWebSocketClientErrorCode.INVALID_JSON);
   });
 
+  it("delivers malformed optional recognition as a non-fatal protocol diagnostic", async () => {
+    const [client, socket] = createClient();
+    const received: GestureWebSocketClientEvent[] = [];
+    client.subscribe((event) => received.push(event));
+    await connectClient(client, socket);
+
+    socket.message(
+      JSON.stringify({
+        protocol_version: 1,
+        type: "gesture.result",
+        sequence: 4,
+        timestamp: 1.5,
+        detected_hand_count: 0,
+        selection: { decision: "NO_HANDS", identity: null },
+        hand: null,
+        gesture: { label: null, engine_decision: "NO_HAND" },
+        action_executed: false,
+        dispatch: null,
+        recognition: { schema_version: 1, frame_sequence: -1 },
+      }),
+    );
+
+    expect(received).toContainEqual(
+      expect.objectContaining({
+        type: "protocol.message",
+        recognitionIntegrity: expect.objectContaining({ kind: "malformed" }),
+      }),
+    );
+    expect(received.some((event) => event.type === "protocol.error")).toBe(
+      false,
+    );
+  });
+
   it("emits and retains valid annotated frames with monotonic sequence handling", async () => {
     const [client, socket] = createClient();
     const sequences: number[] = [];

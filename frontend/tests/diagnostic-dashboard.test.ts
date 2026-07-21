@@ -1050,6 +1050,31 @@ describe("recognition dashboard rendering", () => {
     expect(root.querySelector(".recognition-live")?.textContent).toBe(
       "Open Palm activated",
     );
+    recognition.applyRecognition(
+      {
+        ...snapshot,
+        candidate: {
+          gesture_id: "closed_fist",
+          confidence: 1,
+          reason: "duplicate",
+        },
+        transition: {
+          event_id: 2,
+          kind: "changed",
+          previous_gesture: "open_palm",
+          gesture: "closed_fist",
+          confidence: 1,
+        },
+      },
+      1,
+      { kind: "valid" },
+    );
+    expect(root.querySelector(".recognition-diagnostics")?.textContent).toBe(
+      text,
+    );
+    expect(root.querySelector(".recognition-live")?.textContent).toBe(
+      "Open Palm activated",
+    );
     dashboard.destroy();
     root.remove();
   });

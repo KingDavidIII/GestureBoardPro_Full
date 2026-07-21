@@ -1,4 +1,11 @@
 import type { GestureRecognition } from "../protocol/messages";
+import type { RecognitionIntegrity } from "../protocol/validation";
+
+export type RecognitionIntegrityState =
+  | RecognitionIntegrity
+  | { readonly kind: "duplicate" }
+  | { readonly kind: "stale" }
+  | { readonly kind: "unadvertised" };
 
 export interface RecognitionState {
   readonly availability: "unavailable" | "available";
@@ -7,6 +14,8 @@ export interface RecognitionState {
   readonly recognition: GestureRecognition | null;
   readonly announcedEventId: number | null;
   readonly shouldAnnounce: boolean;
+  readonly integrity: RecognitionIntegrityState;
+  readonly lastAcceptedFrameSequence: number | null;
 }
 export type RecognitionStateListener = (snapshot: RecognitionState) => void;
 
@@ -18,6 +27,8 @@ export const emptyRecognitionState = (epoch = 0): RecognitionState =>
     recognition: null,
     announcedEventId: null,
     shouldAnnounce: false,
+    integrity: { kind: "omitted" as const },
+    lastAcceptedFrameSequence: null,
   });
 
 const copy = (value: GestureRecognition): GestureRecognition =>
@@ -59,25 +70,59 @@ export class RecognitionStateStore {
   applyRecognition(
     recognition: GestureRecognition | null | undefined,
     epoch: number,
+    integrity: RecognitionIntegrity = { kind: "omitted" },
+    unadvertised = false,
   ): void {
     if (epoch !== this.state.epoch || this.destroyed) return;
+    if (integrity.kind === "malformed") {
+      this.publish(
+        Object.freeze({ ...this.state, integrity, shouldAnnounce: false }),
+      );
+      return;
+    }
     if (recognition == null) {
       this.publish(
         Object.freeze({
           ...emptyRecognitionState(epoch),
           capabilityAvailable: this.state.capabilityAvailable,
+          integrity,
+          lastAcceptedFrameSequence: this.state.lastAcceptedFrameSequence,
         }),
       );
       return;
     }
     const value = copy(recognition);
+    if (this.state.lastAcceptedFrameSequence !== null) {
+      if (value.frame_sequence === this.state.lastAcceptedFrameSequence) {
+        this.publish(
+          Object.freeze({
+            ...this.state,
+            integrity: { kind: "duplicate" as const },
+            shouldAnnounce: false,
+          }),
+        );
+        return;
+      }
+      if (value.frame_sequence < this.state.lastAcceptedFrameSequence) {
+        this.publish(
+          Object.freeze({
+            ...this.state,
+            integrity: { kind: "stale" as const },
+            shouldAnnounce: false,
+          }),
+        );
+        return;
+      }
+    }
     const announce =
       value.transition !== null &&
       value.transition.event_id !== this.state.announcedEventId;
     const eventId = value.transition?.event_id;
     this.publish(
       Object.freeze({
-        availability: "available",
+        availability: this.state.capabilityAvailable
+          ? "available"
+          : "unavailable",
         capabilityAvailable: this.state.capabilityAvailable,
         epoch,
         recognition: value,
@@ -86,6 +131,8 @@ export class RecognitionStateStore {
             ? eventId
             : this.state.announcedEventId,
         shouldAnnounce: announce,
+        integrity: unadvertised ? { kind: "unadvertised" as const } : integrity,
+        lastAcceptedFrameSequence: value.frame_sequence,
       }),
     );
   }
