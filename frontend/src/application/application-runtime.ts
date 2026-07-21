@@ -48,16 +48,82 @@ export type ApplicationCleanupErrorHandler = (
   error: unknown,
 ) => void;
 
+export interface ApplicationStartupCleanupRegistry {
+  register(operation: string, release: () => void): void;
+}
+
+export type ApplicationRuntimeResourceFactory = (
+  root: HTMLElement,
+  websocketTarget: string,
+  cleanup: ApplicationStartupCleanupRegistry,
+) => ApplicationRuntimeResources;
+
 export interface CreateApplicationRuntimeOptions {
   readonly lifecycleTarget?: ApplicationLifecycleTarget;
   readonly cleanupErrorHandler?: ApplicationCleanupErrorHandler;
   readonly websocketUrl?: string;
+  readonly resourceFactory?: ApplicationRuntimeResourceFactory;
 }
+
+type CleanupEntry = readonly [operation: string, release: () => void];
 
 const defaultCleanupErrorHandler: ApplicationCleanupErrorHandler = (
   operation,
   error,
 ) => console.error(`Application cleanup failed during ${operation}.`, error);
+
+const reportCleanupError = (
+  handler: ApplicationCleanupErrorHandler,
+  operation: string,
+  error: unknown,
+): void => {
+  try {
+    handler(operation, error);
+  } catch (handlerError) {
+    defaultCleanupErrorHandler(
+      `${operation} cleanup-error-handler`,
+      handlerError,
+    );
+  }
+};
+
+const releaseSafely = (
+  entry: CleanupEntry,
+  handler: ApplicationCleanupErrorHandler,
+): void => {
+  const [operation, release] = entry;
+  try {
+    release();
+  } catch (error) {
+    reportCleanupError(handler, operation, error);
+  }
+};
+
+class ApplicationStartupCleanupStack
+  implements ApplicationStartupCleanupRegistry
+{
+  private readonly entries: CleanupEntry[] = [];
+  private completed = false;
+
+  register(operation: string, release: () => void): void {
+    if (this.completed)
+      throw new Error("Application startup cleanup ownership is closed.");
+    this.entries.push([operation, release]);
+  }
+
+  transferOwnership(): void {
+    if (this.completed) return;
+    this.completed = true;
+    this.entries.length = 0;
+  }
+
+  rollback(handler: ApplicationCleanupErrorHandler): void {
+    if (this.completed) return;
+    this.completed = true;
+    for (const entry of this.entries.reverse()) releaseSafely(entry, handler);
+    this.entries.length = 0;
+  }
+}
 
 /** Own the complete browser application lifecycle and release each resource once. */
 export class ApplicationRuntime {
@@ -79,9 +145,29 @@ export class ApplicationRuntime {
     if (this.lifecycleTarget)
       throw new Error("Application lifecycle events are already attached.");
 
+    try {
+      target.addEventListener("pagehide", this.shutdownListener);
+      target.addEventListener("beforeunload", this.shutdownListener);
+    } catch (error) {
+      releaseSafely(
+        [
+          "lifecycle.beforeunload.remove",
+          () =>
+            target.removeEventListener("beforeunload", this.shutdownListener),
+        ],
+        this.cleanupErrorHandler,
+      );
+      releaseSafely(
+        [
+          "lifecycle.pagehide.remove",
+          () => target.removeEventListener("pagehide", this.shutdownListener),
+        ],
+        this.cleanupErrorHandler,
+      );
+      throw error;
+    }
+
     this.lifecycleTarget = target;
-    target.addEventListener("pagehide", this.shutdownListener);
-    target.addEventListener("beforeunload", this.shutdownListener);
   }
 
   destroy(): void {
@@ -90,15 +176,29 @@ export class ApplicationRuntime {
 
     const lifecycleTarget = this.lifecycleTarget;
     this.lifecycleTarget = null;
+
+    const cleanup: CleanupEntry[] = [];
     if (lifecycleTarget) {
-      lifecycleTarget.removeEventListener("pagehide", this.shutdownListener);
-      lifecycleTarget.removeEventListener(
-        "beforeunload",
-        this.shutdownListener,
+      cleanup.push(
+        [
+          "lifecycle.beforeunload.remove",
+          () =>
+            lifecycleTarget.removeEventListener(
+              "beforeunload",
+              this.shutdownListener,
+            ),
+        ],
+        [
+          "lifecycle.pagehide.remove",
+          () =>
+            lifecycleTarget.removeEventListener(
+              "pagehide",
+              this.shutdownListener,
+            ),
+        ],
       );
     }
-
-    const cleanup: ReadonlyArray<readonly [string, () => void]> = [
+    cleanup.push(
       ["dashboard.destroy", () => this.resources.dashboard.destroy()],
       ["recognition.unsubscribe", this.resources.recognitionUnsubscribe],
       [
@@ -121,15 +221,9 @@ export class ApplicationRuntime {
       ["stream.destroy", () => this.resources.stream.destroy()],
       ["camera.stop", () => this.resources.camera.stop()],
       ["client.destroy", () => this.resources.client.destroy()],
-    ];
+    );
 
-    for (const [operation, release] of cleanup) {
-      try {
-        release();
-      } catch (error) {
-        this.cleanupErrorHandler(operation, error);
-      }
-    }
+    for (const entry of cleanup) releaseSafely(entry, this.cleanupErrorHandler);
   }
 
   get isDestroyed(): boolean {
@@ -137,60 +231,85 @@ export class ApplicationRuntime {
   }
 }
 
-export function createApplicationRuntime(
-  root: HTMLElement,
-  options: CreateApplicationRuntimeOptions = {},
-): ApplicationRuntime {
-  const client = new GestureWebSocketClient(
-    options.websocketUrl ?? websocketUrl(),
-  );
-  const recognition = new RecognitionStateStore();
-  const annotationCorrelation = new AnnotationCorrelation();
-  const recognitionComposition = createRecognitionEventComposition(
-    recognition,
-    annotationCorrelation,
-  );
-  const camera = new CameraController();
-  const encoder = new CanvasFrameEncoder();
-  const stream = new FrameStreamController(camera, encoder, client);
-  const adaptive = new AdaptiveStreamCoordinator(
-    new AdaptiveStreamController({ maximumFps: stream.targetFps }),
-    stream,
-    client,
-  );
-  const adaptiveQuality = new AdaptiveQualityCoordinator(
-    new AdaptiveQualityController({ initialQuality: stream.jpegQuality }),
-    stream,
-    client,
-  );
-  const adaptiveResolution = new AdaptiveResolutionCoordinator(
-    new AdaptiveResolutionController(),
-    new BandwidthEstimator(),
-    stream,
-    client,
-    adaptiveQuality.controller.policy.minimumQuality,
-  );
-  const dashboard = new DiagnosticDashboard(root, client, {
-    camera,
-    stream,
-    adaptive,
-    adaptiveQuality,
-    adaptiveResolution,
-    recognition,
-    annotationCorrelation,
-    jpegQuality: encoder.jpegQuality,
-    maximumFrameWidth: encoder.maximumWidth,
-  });
+const createDefaultApplicationRuntimeResources: ApplicationRuntimeResourceFactory =
+  (root, websocketTarget, cleanup) => {
+    const client = new GestureWebSocketClient(websocketTarget);
+    cleanup.register("client.destroy", () => client.destroy());
 
-  const runtime = new ApplicationRuntime(
-    {
+    const recognition = new RecognitionStateStore();
+    const annotationCorrelation = new AnnotationCorrelation();
+    const recognitionComposition = createRecognitionEventComposition(
+      recognition,
+      annotationCorrelation,
+    );
+    cleanup.register("recognition-composition.destroy", () =>
+      recognitionComposition.destroy(),
+    );
+
+    const camera = new CameraController();
+    cleanup.register("camera.stop", () => camera.stop());
+
+    const encoder = new CanvasFrameEncoder();
+    const stream = new FrameStreamController(camera, encoder, client);
+    cleanup.register("stream.destroy", () => stream.destroy());
+
+    const adaptive = new AdaptiveStreamCoordinator(
+      new AdaptiveStreamController({ maximumFps: stream.targetFps }),
+      stream,
+      client,
+    );
+    cleanup.register("adaptive-stream.destroy", () => adaptive.destroy());
+
+    const adaptiveQuality = new AdaptiveQualityCoordinator(
+      new AdaptiveQualityController({ initialQuality: stream.jpegQuality }),
+      stream,
+      client,
+    );
+    cleanup.register("adaptive-quality.destroy", () =>
+      adaptiveQuality.destroy(),
+    );
+
+    const adaptiveResolution = new AdaptiveResolutionCoordinator(
+      new AdaptiveResolutionController(),
+      new BandwidthEstimator(),
+      stream,
+      client,
+      adaptiveQuality.controller.policy.minimumQuality,
+    );
+    cleanup.register("adaptive-resolution.destroy", () =>
+      adaptiveResolution.destroy(),
+    );
+
+    const dashboard = new DiagnosticDashboard(root, client, {
+      camera,
+      stream,
+      adaptive,
+      adaptiveQuality,
+      adaptiveResolution,
+      recognition,
+      annotationCorrelation,
+      jpegQuality: encoder.jpegQuality,
+      maximumFrameWidth: encoder.maximumWidth,
+    });
+    cleanup.register("dashboard.destroy", () => dashboard.destroy());
+
+    const recognitionUnsubscribe = client.subscribe(
+      recognitionComposition.handleSocketEvent,
+    );
+    cleanup.register("recognition.unsubscribe", recognitionUnsubscribe);
+
+    const streamRecognitionUnsubscribe = stream.subscribe(
+      recognitionComposition.handleStreamEvent,
+    );
+    cleanup.register(
+      "stream-recognition.unsubscribe",
+      streamRecognitionUnsubscribe,
+    );
+
+    return {
       dashboard,
-      recognitionUnsubscribe: client.subscribe(
-        recognitionComposition.handleSocketEvent,
-      ),
-      streamRecognitionUnsubscribe: stream.subscribe(
-        recognitionComposition.handleStreamEvent,
-      ),
+      recognitionUnsubscribe,
+      streamRecognitionUnsubscribe,
       recognitionComposition,
       adaptive,
       adaptiveQuality,
@@ -198,9 +317,36 @@ export function createApplicationRuntime(
       stream,
       camera,
       client,
-    },
-    options.cleanupErrorHandler,
-  );
-  runtime.attachLifecycle(options.lifecycleTarget ?? window);
+    };
+  };
+
+export function createApplicationRuntime(
+  root: HTMLElement,
+  options: CreateApplicationRuntimeOptions = {},
+): ApplicationRuntime {
+  const cleanupErrorHandler =
+    options.cleanupErrorHandler ?? defaultCleanupErrorHandler;
+  const startupCleanup = new ApplicationStartupCleanupStack();
+  let runtime: ApplicationRuntime;
+
+  try {
+    const resources = (
+      options.resourceFactory ?? createDefaultApplicationRuntimeResources
+    )(root, options.websocketUrl ?? websocketUrl(), startupCleanup);
+    runtime = new ApplicationRuntime(resources, cleanupErrorHandler);
+  } catch (error) {
+    startupCleanup.rollback(cleanupErrorHandler);
+    throw error;
+  }
+
+  startupCleanup.transferOwnership();
+
+  try {
+    runtime.attachLifecycle(options.lifecycleTarget ?? window);
+  } catch (error) {
+    runtime.destroy();
+    throw error;
+  }
+
   return runtime;
 }
