@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import errorFixtures from "../../contracts/gesture-protocol/v1/fixtures/server-error-messages.json";
+
 import {
   FrontendProtocolError,
   FrontendProtocolErrorCode,
@@ -40,6 +42,21 @@ const scheduler = {
 };
 
 describe("protocol validation", () => {
+  it("accepts every shared v1 backend error fixture without changing safe fields", () => {
+    for (const fixture of errorFixtures) {
+      expect(validateServerMessage(fixture)).toEqual(fixture);
+    }
+  });
+
+  it("rejects an unknown server error code", () => {
+    expect(() =>
+      validateServerMessage({
+        protocol_version: 1,
+        type: "error",
+        error: { code: "future_error", message: "Unknown." },
+      }),
+    ).toThrow(FrontendProtocolError);
+  });
   it("accepts protocol version 1 server messages", () => {
     expect(
       parseServerMessage('{"protocol_version":1,"type":"connection.ready"}'),

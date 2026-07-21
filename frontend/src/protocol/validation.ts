@@ -72,6 +72,8 @@ const errorCodes = new Set<ProtocolErrorCode>([
   "runtime_failure",
   "reset_failure",
   "internal_error",
+  "invalid_annotation_control",
+  "annotation_encoding_failed",
 ]);
 const recognitionGestures = new Set<GestureIdentifier>([
   "open_palm",

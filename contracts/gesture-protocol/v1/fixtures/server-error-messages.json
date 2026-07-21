@@ -1,0 +1,65 @@
+[
+  {
+    "protocol_version": 1,
+    "type": "error",
+    "error": { "code": "invalid_message", "message": "Invalid request." }
+  },
+  {
+    "protocol_version": 1,
+    "type": "error",
+    "error": { "code": "invalid_json", "message": "Invalid JSON." }
+  },
+  {
+    "protocol_version": 1,
+    "type": "error",
+    "error": {
+      "code": "unsupported_message",
+      "message": "Unsupported message."
+    }
+  },
+  {
+    "protocol_version": 1,
+    "type": "error",
+    "error": { "code": "invalid_frame", "message": "Invalid frame." }
+  },
+  {
+    "protocol_version": 1,
+    "type": "error",
+    "error": { "code": "frame_too_large", "message": "Frame is too large." }
+  },
+  {
+    "protocol_version": 1,
+    "type": "error",
+    "error": {
+      "code": "runtime_failure",
+      "message": "Runtime processing failed."
+    }
+  },
+  {
+    "protocol_version": 1,
+    "type": "error",
+    "error": { "code": "reset_failure", "message": "Runtime reset failed." }
+  },
+  {
+    "protocol_version": 1,
+    "type": "error",
+    "error": { "code": "internal_error", "message": "Internal error." }
+  },
+  {
+    "protocol_version": 1,
+    "type": "error",
+    "error": {
+      "code": "invalid_annotation_control",
+      "message": "Invalid annotation control."
+    },
+    "request_id": "annotation-1"
+  },
+  {
+    "protocol_version": 1,
+    "type": "error",
+    "error": {
+      "code": "annotation_encoding_failed",
+      "message": "Annotation encoding failed."
+    }
+  }
+]

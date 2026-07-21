@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import errorFixtures from "../../contracts/gesture-protocol/v1/fixtures/server-error-messages.json";
+
 import {
   GestureWebSocketClient,
   GestureWebSocketClientError,
@@ -124,6 +126,33 @@ function resilientClient(
 }
 
 describe("GestureWebSocketClient", () => {
+  it("delivers every supported backend error fixture as a protocol message", async () => {
+    const [client, socket] = createClient();
+    const received: GestureWebSocketClientEvent[] = [];
+    client.subscribe((event) => received.push(event));
+    await connectClient(client, socket);
+
+    for (const fixture of errorFixtures)
+      socket.message(JSON.stringify(fixture));
+
+    const messages = received.filter(
+      (
+        event,
+      ): event is Extract<
+        GestureWebSocketClientEvent,
+        { type: "protocol.message" }
+      > => event.type === "protocol.message",
+    );
+    expect(messages.map((event) => event.message)).toEqual(errorFixtures);
+    expect(
+      received.some(
+        (event) =>
+          event.type === "protocol.error" &&
+          event.error.code ===
+            GestureWebSocketClientErrorCode.INVALID_PROTOCOL_MESSAGE,
+      ),
+    ).toBe(false);
+  });
   it("sends annotation controls only while open and confirms state on acknowledgement", async () => {
     const [client, socket] = createClient();
 
