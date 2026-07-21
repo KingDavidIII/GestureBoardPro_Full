@@ -34,10 +34,12 @@ export class CameraController {
   private readonly mediaDevices: Pick<MediaDevices, "getUserMedia"> | undefined;
   private readonly subscriberErrorHandler: (error: unknown) => void;
   private readonly listeners = new Set<CameraListener>();
+  private readonly releasedStreams = new WeakSet<MediaStream>();
   private state = CameraState.IDLE;
   private stream: MediaStream | null = null;
   private preview: PreviewVideoElement | null = null;
   private metadata: CameraMetadata | null = null;
+  private acquisitionEpoch = 0;
 
   readonly preferredWidth: number;
   readonly preferredHeight: number;
@@ -90,9 +92,12 @@ export class CameraController {
       );
     }
 
+    const epoch = ++this.acquisitionEpoch;
+    let acquiredStream: MediaStream | null = null;
     this.setState(CameraState.REQUESTING_PERMISSION);
+
     try {
-      const stream = await this.mediaDevices.getUserMedia({
+      acquiredStream = await this.mediaDevices.getUserMedia({
         audio: false,
         video: {
           width: { ideal: this.preferredWidth },
@@ -101,31 +106,58 @@ export class CameraController {
           facingMode: { ideal: this.facingMode },
         },
       });
-      const track = stream
+      this.assertCurrentAcquisition(epoch);
+
+      const track = acquiredStream
         .getVideoTracks()
         .find((candidate) => candidate.readyState === "live");
       if (!track) {
-        stream.getTracks().forEach((candidate) => candidate.stop());
         throw this.error(
           CameraErrorCode.CAMERA_START_FAILED,
           "No live video track was returned.",
         );
       }
-      this.stream = stream;
-      this.metadata = this.readMetadata(track);
-      if (this.preview) await this.assignPreview(this.preview);
+
+      const metadata = this.readMetadata(track);
+      this.assertCurrentAcquisition(epoch);
+      this.stream = acquiredStream;
+      this.metadata = metadata;
+
+      const preview = this.preview;
+      if (preview) await this.assignPreview(preview, acquiredStream);
+      this.assertCurrentAcquisition(epoch);
+      if (this.stream !== acquiredStream) throw this.cancelledStartError();
+
       this.setState(CameraState.READY);
-      this.emit(Object.freeze({ type: "ready", metadata: this.metadata }));
-      return this.metadata;
+      this.emit(Object.freeze({ type: "ready", metadata }));
+      return metadata;
     } catch (cause) {
-      if (cause instanceof CameraError) throw this.fail(cause);
-      throw this.fail(this.mapStartError(cause));
+      const cancelled =
+        !this.isCurrentAcquisition(epoch) || this.isCancellation(cause);
+      if (acquiredStream) this.releaseStream(acquiredStream);
+      if (cancelled) throw this.cancelledStartError(cause);
+
+      const error =
+        cause instanceof CameraError ? cause : this.mapStartError(cause);
+      throw this.fail(error);
     }
   }
 
   async attachPreview(preview: PreviewVideoElement): Promise<void> {
     this.preview = preview;
-    if (this.stream) await this.assignPreview(preview);
+    const stream = this.stream;
+    if (!stream) return;
+
+    try {
+      await this.assignPreview(preview, stream);
+    } catch (cause) {
+      if (this.preview !== preview || this.stream !== stream) return;
+      this.acquisitionEpoch += 1;
+      this.releaseStream(stream);
+      const error =
+        cause instanceof CameraError ? cause : this.mapStartError(cause);
+      throw this.fail(error);
+    }
   }
 
   detachPreview(): void {
@@ -139,13 +171,19 @@ export class CameraController {
       (this.state === CameraState.IDLE || this.state === CameraState.STOPPED)
     )
       return;
+
+    this.acquisitionEpoch += 1;
     this.setState(CameraState.STOPPING);
     const stream = this.stream;
     this.stream = null;
     this.metadata = null;
     if (this.preview) this.preview.srcObject = null;
-    stream?.getTracks().forEach((track) => track.stop());
-    this.setState(CameraState.STOPPED);
+
+    try {
+      if (stream) this.releaseStream(stream);
+    } finally {
+      this.setState(CameraState.STOPPED);
+    }
   }
 
   subscribe(listener: CameraListener): () => void {
@@ -166,17 +204,56 @@ export class CameraController {
     return this.preview;
   }
 
-  private async assignPreview(preview: PreviewVideoElement): Promise<void> {
-    preview.srcObject = this.stream;
+  private async assignPreview(
+    preview: PreviewVideoElement,
+    stream: MediaStream,
+  ): Promise<void> {
+    preview.srcObject = stream;
     try {
       await preview.play();
     } catch (cause) {
+      if (preview.srcObject === stream) preview.srcObject = null;
       throw this.error(
         CameraErrorCode.CAMERA_PLAYBACK_FAILED,
         "Camera preview could not play.",
         cause,
       );
     }
+  }
+
+  private assertCurrentAcquisition(epoch: number): void {
+    if (!this.isCurrentAcquisition(epoch)) throw this.cancelledStartError();
+  }
+
+  private isCurrentAcquisition(epoch: number): boolean {
+    return this.acquisitionEpoch === epoch;
+  }
+
+  private isCancellation(cause: unknown): boolean {
+    return (
+      cause instanceof CameraError &&
+      cause.code === CameraErrorCode.CAMERA_START_CANCELLED
+    );
+  }
+
+  private cancelledStartError(cause?: unknown): CameraError {
+    return this.error(
+      CameraErrorCode.CAMERA_START_CANCELLED,
+      "Camera start was cancelled.",
+      cause,
+    );
+  }
+
+  private releaseStream(stream: MediaStream): void {
+    if (this.stream === stream) {
+      this.stream = null;
+      this.metadata = null;
+    }
+    if (this.preview?.srcObject === stream) this.preview.srcObject = null;
+    if (this.releasedStreams.has(stream)) return;
+
+    this.releasedStreams.add(stream);
+    stream.getTracks().forEach((track) => track.stop());
   }
 
   private readMetadata(track: MediaStreamTrack): CameraMetadata {
