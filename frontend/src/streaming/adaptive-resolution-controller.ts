@@ -7,6 +7,7 @@ import type {
   GestureWebSocketClientEvent,
   WebSocketClientState,
 } from "../websocket";
+import { releaseResourceOperations } from "../lifecycle/resource-cleanup";
 import {
   FrameStreamState,
   type FrameStreamEvent,
@@ -398,18 +399,31 @@ export class AdaptiveResolutionCoordinator {
     this.publish();
   }
   subscribe(listener: AdaptiveResolutionListener): () => void {
+    if (this.destroyed) return () => undefined;
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
   destroy(): void {
     if (this.destroyed) return;
-    this.reset();
     this.destroyed = true;
-    this.unsubscribeStream();
-    this.unsubscribeSocket();
-    this.listeners.clear();
+    releaseResourceOperations("AdaptiveResolutionCoordinator", [
+      [
+        "controller.reset",
+        () => {
+          this.controller.reset();
+          this.estimator.reset();
+          this.estimate = this.estimator.getState();
+          this.latest = null;
+          this.publish();
+        },
+      ],
+      ["stream.unsubscribe", this.unsubscribeStream],
+      ["socket.unsubscribe", this.unsubscribeSocket],
+      ["listeners.clear", () => this.listeners.clear()],
+    ]);
   }
   private handleStream(event: FrameStreamEvent): void {
+    if (this.destroyed) return;
     if (
       event.type === "state.changed" &&
       event.state !== FrameStreamState.STARTING &&
@@ -471,6 +485,7 @@ export class AdaptiveResolutionCoordinator {
     this.publish();
   }
   private handleSocket(event: GestureWebSocketClientEvent): void {
+    if (this.destroyed) return;
     if (
       (event.type === "state.changed" && event.state !== "OPEN") ||
       event.type === "reconnect.started"

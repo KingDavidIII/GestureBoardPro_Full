@@ -22,6 +22,7 @@ import type {
   GestureWebSocketClientEvent,
   WebSocketClientState,
 } from "../websocket";
+import { releaseResourceOperations } from "../lifecycle/resource-cleanup";
 import {
   AnnotationCorrelation,
   type AnnotationCorrelationUpdate,
@@ -208,40 +209,43 @@ export class DiagnosticDashboard {
     this.resolutionModeButton.addEventListener("click", () =>
       this.toggleResolutionMode(),
     );
-    this.unsubscribe = this.client.subscribe((event) =>
-      this.handleEvent(event),
-    );
+    this.unsubscribe = this.client.subscribe((event) => {
+      if (!this.destroyed) this.handleEvent(event);
+    });
     this.unsubscribeAnnotationCorrelation =
-      this.annotationCorrelation.subscribe((update) =>
-        this.applyAnnotationUpdate(update),
-      );
+      this.annotationCorrelation.subscribe((update) => {
+        if (!this.destroyed) this.applyAnnotationUpdate(update);
+      });
     this.unsubscribeCamera =
-      this.options.camera?.subscribe((event) =>
-        this.handleCameraEvent(event),
-      ) ?? null;
+      this.options.camera?.subscribe((event) => {
+        if (!this.destroyed) this.handleCameraEvent(event);
+      }) ?? null;
     this.unsubscribeStream =
-      this.options.stream?.subscribe((event) =>
-        this.handleStreamEvent(event),
-      ) ?? null;
+      this.options.stream?.subscribe((event) => {
+        if (!this.destroyed) this.handleStreamEvent(event);
+      }) ?? null;
     this.unsubscribeAdaptive =
       this.options.adaptive?.subscribe((snapshot) => {
+        if (this.destroyed) return;
         this.adaptiveSnapshot = snapshot;
         this.renderAdaptive();
       }) ?? null;
     this.unsubscribeQuality =
       this.options.adaptiveQuality?.subscribe((snapshot) => {
+        if (this.destroyed) return;
         this.qualitySnapshot = snapshot;
         this.renderQuality();
       }) ?? null;
     this.unsubscribeResolution =
       this.options.adaptiveResolution?.subscribe((snapshot) => {
+        if (this.destroyed) return;
         this.resolutionSnapshot = snapshot;
         this.renderResolution();
       }) ?? null;
     this.unsubscribeRecognition =
-      this.options.recognition?.subscribe((snapshot) =>
-        this.renderRecognition(snapshot),
-      ) ?? null;
+      this.options.recognition?.subscribe((snapshot) => {
+        if (!this.destroyed) this.renderRecognition(snapshot);
+      }) ?? null;
     if (this.options.camera) void this.options.camera.attachPreview(this.video);
     this.renderState(this.client.getState());
     this.renderCamera();
@@ -268,21 +272,32 @@ export class DiagnosticDashboard {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
-    this.unsubscribe();
-    this.unsubscribeAnnotationCorrelation();
-    this.unsubscribeCamera?.();
-    this.unsubscribeStream?.();
-    this.unsubscribeAdaptive?.();
-    this.unsubscribeQuality?.();
-    this.unsubscribeResolution?.();
-    this.unsubscribeRecognition?.();
-    this.options.adaptive?.reset();
-    this.options.adaptiveQuality?.reset();
-    this.options.adaptiveResolution?.reset();
-    this.options.camera?.detachPreview();
-    this.annotationCorrelation.reset();
-    this.clearAnnotation();
-    this.root.replaceChildren();
+    releaseResourceOperations("DiagnosticDashboard", [
+      ["client.unsubscribe", this.unsubscribe],
+      [
+        "annotation-correlation.unsubscribe",
+        this.unsubscribeAnnotationCorrelation,
+      ],
+      ["camera.unsubscribe", () => this.unsubscribeCamera?.()],
+      ["stream.unsubscribe", () => this.unsubscribeStream?.()],
+      ["adaptive-stream.unsubscribe", () => this.unsubscribeAdaptive?.()],
+      ["adaptive-quality.unsubscribe", () => this.unsubscribeQuality?.()],
+      ["adaptive-resolution.unsubscribe", () => this.unsubscribeResolution?.()],
+      ["recognition.unsubscribe", () => this.unsubscribeRecognition?.()],
+      ["adaptive-stream.reset", () => this.options.adaptive?.reset()],
+      ["adaptive-quality.reset", () => this.options.adaptiveQuality?.reset()],
+      [
+        "adaptive-resolution.reset",
+        () => this.options.adaptiveResolution?.reset(),
+      ],
+      ["camera.detach-preview", () => this.options.camera?.detachPreview()],
+      [
+        "annotation-correlation.reset",
+        () => this.annotationCorrelation.reset(),
+      ],
+      ["annotation.clear", () => this.clearAnnotation()],
+      ["root.clear", () => this.root.replaceChildren()],
+    ]);
   }
   private renderRecognition(snapshot: RecognitionState): void {
     const item = snapshot.recognition;

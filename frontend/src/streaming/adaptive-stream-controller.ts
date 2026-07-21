@@ -1,4 +1,5 @@
 import type { SchedulerMetadata } from "../protocol";
+import { releaseResourceOperations } from "../lifecycle/resource-cleanup";
 import type {
   GestureWebSocketClientEvent,
   WebSocketClientState,
@@ -296,20 +297,31 @@ export class AdaptiveStreamCoordinator {
   }
 
   subscribe(listener: AdaptiveStreamListener): () => void {
+    if (this.destroyed) return () => undefined;
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
   destroy(): void {
     if (this.destroyed) return;
-    this.reset();
     this.destroyed = true;
-    this.unsubscribeSocket();
-    this.unsubscribeStream();
-    this.listeners.clear();
+    releaseResourceOperations("AdaptiveStreamCoordinator", [
+      [
+        "controller.reset",
+        () => {
+          this.controller.reset();
+          this.latestDecision = null;
+          this.publish();
+        },
+      ],
+      ["socket.unsubscribe", this.unsubscribeSocket],
+      ["stream.unsubscribe", this.unsubscribeStream],
+      ["listeners.clear", () => this.listeners.clear()],
+    ]);
   }
 
   private handleSocket(event: GestureWebSocketClientEvent): void {
+    if (this.destroyed) return;
     if (event.type === "state.changed" && event.state !== "OPEN") {
       this.reset();
       return;
@@ -342,6 +354,7 @@ export class AdaptiveStreamCoordinator {
   }
 
   private handleStream(event: FrameStreamEvent): void {
+    if (this.destroyed) return;
     if (
       event.type === "state.changed" &&
       event.state !== FrameStreamState.STARTING &&

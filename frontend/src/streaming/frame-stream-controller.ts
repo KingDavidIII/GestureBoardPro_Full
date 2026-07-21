@@ -8,6 +8,7 @@ import {
   WebSocketClientState,
   type GestureWebSocketClientEvent,
 } from "../websocket";
+import { releaseResourceOperations } from "../lifecycle/resource-cleanup";
 import {
   FrameStreamDecision,
   FrameStreamError,
@@ -66,6 +67,7 @@ export class FrameStreamController {
   private processing = false;
   private lastAttemptAt: number | null = null;
   private metrics: FrameStreamMetrics;
+  private destroyed = false;
 
   constructor(
     readonly camera: StreamCameraController,
@@ -112,6 +114,11 @@ export class FrameStreamController {
   }
 
   start(): void {
+    if (this.destroyed)
+      throw this.error(
+        FrameStreamErrorCode.INVALID_STATE,
+        "Streaming controller has been destroyed.",
+      );
     if (this.isActive())
       throw this.error(
         FrameStreamErrorCode.INVALID_STATE,
@@ -153,11 +160,17 @@ export class FrameStreamController {
   }
 
   destroy(): void {
-    this.stop();
-    this.cameraUnsubscribe();
-    this.socketUnsubscribe();
+    if (this.destroyed) return;
+    this.destroyed = true;
+    releaseResourceOperations("FrameStreamController", [
+      ["stream.stop", () => this.stop()],
+      ["camera.unsubscribe", this.cameraUnsubscribe],
+      ["socket.unsubscribe", this.socketUnsubscribe],
+      ["listeners.clear", () => this.listeners.clear()],
+    ]);
   }
   subscribe(listener: FrameStreamListener): () => void {
+    if (this.destroyed) return () => undefined;
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
