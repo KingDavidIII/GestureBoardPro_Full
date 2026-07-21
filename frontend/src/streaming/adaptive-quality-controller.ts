@@ -2,6 +2,7 @@ import type {
   GestureWebSocketClientEvent,
   WebSocketClientState,
 } from "../websocket";
+import { releaseResourceOperations } from "../lifecycle/resource-cleanup";
 import {
   FrameStreamState,
   type FrameStreamEvent,
@@ -346,18 +347,29 @@ export class AdaptiveQualityCoordinator {
     this.publish();
   }
   subscribe(listener: AdaptiveQualityListener): () => void {
+    if (this.destroyed) return () => undefined;
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
   destroy(): void {
     if (this.destroyed) return;
-    this.reset();
     this.destroyed = true;
-    this.unsubscribeStream();
-    this.unsubscribeSocket();
-    this.listeners.clear();
+    releaseResourceOperations("AdaptiveQualityCoordinator", [
+      [
+        "controller.reset",
+        () => {
+          this.controller.reset();
+          this.latest = null;
+          this.publish();
+        },
+      ],
+      ["stream.unsubscribe", this.unsubscribeStream],
+      ["socket.unsubscribe", this.unsubscribeSocket],
+      ["listeners.clear", () => this.listeners.clear()],
+    ]);
   }
   private handleStream(event: FrameStreamEvent): void {
+    if (this.destroyed) return;
     if (
       event.type === "state.changed" &&
       event.state !== FrameStreamState.STARTING &&
@@ -398,6 +410,7 @@ export class AdaptiveQualityCoordinator {
     this.publish();
   }
   private handleSocket(event: GestureWebSocketClientEvent): void {
+    if (this.destroyed) return;
     if (
       (event.type === "state.changed" && event.state !== "OPEN") ||
       event.type === "reconnect.started"
