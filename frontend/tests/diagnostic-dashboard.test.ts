@@ -11,6 +11,7 @@ import {
   DiagnosticDashboard,
   type ObjectUrlApi,
 } from "../src/dashboard";
+import { ResourceCleanupError } from "../src/lifecycle/resource-cleanup";
 import { RecognitionStateStore } from "../src/recognition";
 import {
   FrameStreamState,
@@ -381,6 +382,56 @@ describe("DiagnosticDashboard", () => {
     dashboard.destroy();
 
     expect(root.childElementCount).toBe(0);
+  });
+
+  it("keeps delegated controls terminal after listener removal fails", () => {
+    const connect = root.querySelector<HTMLButtonElement>(
+      '[data-action="connect"]',
+    );
+    const connectSpy = vi.spyOn(client, "connect").mockResolvedValue(undefined);
+    const removalFailure = new Error("control listener removal failed");
+    vi.spyOn(root, "removeEventListener").mockImplementation(() => {
+      throw removalFailure;
+    });
+
+    let cleanupError: unknown;
+    try {
+      dashboard.destroy();
+    } catch (error) {
+      cleanupError = error;
+    }
+
+    expect(cleanupError).toBeInstanceOf(ResourceCleanupError);
+    expect((cleanupError as ResourceCleanupError).failures).toEqual([
+      { operation: "controls.remove", error: removalFailure },
+    ]);
+    expect(root.childElementCount).toBe(0);
+
+    if (connect) root.append(connect);
+    connect?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(connectSpy).not.toHaveBeenCalled();
+  });
+
+  it("ignores a pending connection failure after destruction", async () => {
+    const connect = root.querySelector<HTMLButtonElement>(
+      '[data-action="connect"]',
+    );
+    const messages = root.querySelector<HTMLOListElement>(".message-log");
+    let rejectConnection!: (reason?: unknown) => void;
+    vi.spyOn(client, "connect").mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectConnection = reject;
+        }),
+    );
+
+    connect?.click();
+    dashboard.destroy();
+    rejectConnection(new Error("late connection failure"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(messages?.childElementCount).toBe(0);
   });
 
   it("renders separate accessible annotation and camera previews", () => {

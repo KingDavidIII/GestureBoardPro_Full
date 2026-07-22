@@ -114,6 +114,51 @@ export class DiagnosticDashboard {
   private readonly ownsAnnotationCorrelation: boolean;
   private readonly handlesAnnotationEvents: boolean;
   private readonly unsubscribeAnnotationCorrelation: () => void;
+  private readonly controlListener: EventListener = (event) => {
+    if (this.destroyed) return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const control = target.closest<HTMLButtonElement>("button[data-action]");
+    if (!control || !this.root.contains(control)) return;
+
+    switch (control.dataset.action) {
+      case "connect":
+        void this.connect();
+        return;
+      case "disconnect":
+        this.disconnect();
+        return;
+      case "ping":
+        this.sendControl(() => this.client.sendPing());
+        return;
+      case "reset":
+        this.sendControl(() => this.client.resetRuntime());
+        return;
+      case "start-camera":
+        void this.startCamera();
+        return;
+      case "stop-camera":
+        this.stopCamera();
+        return;
+      case "start-stream":
+        this.startStream();
+        return;
+      case "stop-stream":
+        this.options.stream?.stop();
+        return;
+      case "annotation":
+        this.toggleAnnotations();
+        return;
+      case "adaptive-mode":
+        this.toggleAdaptiveMode();
+        return;
+      case "quality-mode":
+        this.toggleQualityMode();
+        return;
+      case "resolution-mode":
+        this.toggleResolutionMode();
+    }
+  };
   private destroyed = false;
   private reconnectPending = false;
   private schedulerMetrics: SchedulerMetadata | null = null;
@@ -184,35 +229,7 @@ export class DiagnosticDashboard {
     this.messages = this.element(".message-log");
     this.element<HTMLParagraphElement>(".connection-url").textContent =
       this.client.url;
-    this.connectButton.addEventListener("click", () => void this.connect());
-    this.disconnectButton.addEventListener("click", () => this.disconnect());
-    this.pingButton.addEventListener("click", () =>
-      this.sendControl(() => this.client.sendPing()),
-    );
-    this.resetButton.addEventListener("click", () =>
-      this.sendControl(() => this.client.resetRuntime()),
-    );
-    this.startCameraButton.addEventListener(
-      "click",
-      () => void this.startCamera(),
-    );
-    this.stopCameraButton.addEventListener("click", () => this.stopCamera());
-    this.startStreamButton.addEventListener("click", () => this.startStream());
-    this.stopStreamButton.addEventListener("click", () =>
-      this.options.stream?.stop(),
-    );
-    this.annotationButton.addEventListener("click", () =>
-      this.toggleAnnotations(),
-    );
-    this.adaptiveModeButton.addEventListener("click", () =>
-      this.toggleAdaptiveMode(),
-    );
-    this.qualityModeButton.addEventListener("click", () =>
-      this.toggleQualityMode(),
-    );
-    this.resolutionModeButton.addEventListener("click", () =>
-      this.toggleResolutionMode(),
-    );
+    this.root.addEventListener("click", this.controlListener);
     this.unsubscribe = this.client.subscribe((event) => {
       if (!this.destroyed) this.handleEvent(event);
     });
@@ -277,6 +294,10 @@ export class DiagnosticDashboard {
     if (this.destroyed) return;
     this.destroyed = true;
     releaseResourceOperations("DiagnosticDashboard", [
+      [
+        "controls.remove",
+        () => this.root.removeEventListener("click", this.controlListener),
+      ],
       ["client.unsubscribe", this.unsubscribe],
       [
         "annotation-correlation.unsubscribe",
@@ -636,6 +657,7 @@ export class DiagnosticDashboard {
     this.resolutionDiagnostics.textContent = `Bandwidth estimate: ${bitrate}; confidence: ${estimate.confidence}; pressure: ${estimate.pressure}; estimated bytes per second: ${estimate.estimatedBytesPerSecond === null ? "unavailable" : Math.min(estimate.estimatedBytesPerSecond, 999999999).toFixed(0)}; average frame size: ${estimate.averageFrameBytes ?? "unavailable"}; buffered: ${estimate.latestBufferedBytes}; payload: ${estimate.latestPayloadBytes}. Resolution mode: ${snapshot.mode === "adaptive" ? "Adaptive" : "Fixed"}; current profile: ${snapshot.currentProfile.id}; dimensions: ${snapshot.currentProfile.width}×${snapshot.currentProfile.height}; minimum profile: ${snapshot.minimumProfile.id}; maximum profile: ${snapshot.maximumProfile.id}; healthy samples: ${snapshot.healthySamples}; overload samples: ${snapshot.overloadSamples}; headroom: ${headroom}; cooldown: ${snapshot.cooldownActive ? "active" : "inactive"}.`;
   }
   private append(title: string, detail: string): void {
+    if (this.destroyed) return;
     const entry = document.createElement("li");
     const heading = document.createElement("strong");
     heading.textContent = title;
