@@ -1,23 +1,5 @@
 #!/usr/bin/env python
-"""
-GestureBoard Pro
-================
-
-Project entry point for Django administrative commands.
-
-This script bootstraps the Django application by setting the default
-settings module and delegating command execution to Django's management
-framework.
-
-Author:
-    King David
-
-Project:
-    GestureBoard Pro
-
-Version:
-    0.1.0-alpha.1
-"""
+"""GestureBoard Pro Django management utility."""
 
 from __future__ import annotations
 
