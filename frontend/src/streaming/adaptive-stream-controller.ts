@@ -69,6 +69,10 @@ export interface AdaptiveStreamSnapshot {
 
 export type AdaptiveStreamListener = (snapshot: AdaptiveStreamSnapshot) => void;
 
+export interface AdaptiveStreamCoordinatorOptions {
+  readonly subscriberErrorHandler?: (error: unknown) => void;
+}
+
 export interface AdaptiveFrameStream {
   readonly targetFps: number;
   getState(): FrameStreamState;
@@ -249,6 +253,7 @@ export class AdaptiveStreamController {
 
 export class AdaptiveStreamCoordinator {
   private readonly listeners = new Set<AdaptiveStreamListener>();
+  private readonly subscriberErrorHandler: (error: unknown) => void;
   private readonly unsubscribeSocket: () => void;
   private readonly unsubscribeStream: () => void;
   private latestDecision: AdaptiveDecision | null = null;
@@ -258,7 +263,11 @@ export class AdaptiveStreamCoordinator {
     readonly controller: AdaptiveStreamController,
     private readonly stream: AdaptiveFrameStream,
     private readonly socket: AdaptiveWebSocketSource,
+    options: AdaptiveStreamCoordinatorOptions = {},
   ) {
+    this.subscriberErrorHandler =
+      options.subscriberErrorHandler ??
+      ((error) => console.error("Adaptive stream listener failed", error));
     this.unsubscribeSocket = socket.subscribe((event) =>
       this.handleSocket(event),
     );
@@ -365,6 +374,12 @@ export class AdaptiveStreamCoordinator {
 
   private publish(): void {
     const snapshot = this.getSnapshot();
-    for (const listener of [...this.listeners]) listener(snapshot);
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(snapshot);
+      } catch (error) {
+        this.subscriberErrorHandler(error);
+      }
+    }
   }
 }

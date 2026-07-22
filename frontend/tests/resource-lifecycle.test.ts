@@ -162,7 +162,10 @@ describe("resource lifecycle hardening", () => {
     readonly name: string;
     readonly create: () => {
       readonly destroy: () => void;
-      readonly subscribeFailingListener: () => void;
+      readonly reset: () => void;
+      readonly subscribe: (listener: () => void) => () => void;
+      readonly subscriberErrorHandler: ReturnType<typeof vi.fn>;
+      readonly failReset: (error: Error) => void;
       readonly firstRelease: ReturnType<typeof vi.fn>;
       readonly secondRelease: ReturnType<typeof vi.fn>;
       readonly firstReleaseOperation: string;
@@ -184,16 +187,22 @@ describe("resource lifecycle hardening", () => {
           getState: () => WebSocketClientState.CLOSED,
           subscribe: socketEvents.subscribe,
         };
+        const controller = new AdaptiveStreamController({ maximumFps: 8 });
+        const subscriberErrorHandler = vi.fn();
         const coordinator = new AdaptiveStreamCoordinator(
-          new AdaptiveStreamController({ maximumFps: 8 }),
+          controller,
           stream,
           socket,
+          { subscriberErrorHandler },
         );
         return {
           destroy: () => coordinator.destroy(),
-          subscribeFailingListener: () => {
-            coordinator.subscribe(() => {
-              throw new Error("adaptive stream listener failed");
+          reset: () => coordinator.reset(),
+          subscribe: (listener) => coordinator.subscribe(listener),
+          subscriberErrorHandler,
+          failReset: (error) => {
+            vi.spyOn(controller, "reset").mockImplementationOnce(() => {
+              throw error;
             });
           },
           firstRelease: socketEvents.unsubscribe,
@@ -220,16 +229,24 @@ describe("resource lifecycle hardening", () => {
           getBufferedAmount: () => 0,
           subscribe: socketEvents.subscribe,
         };
+        const controller = new AdaptiveQualityController({
+          initialQuality: 0.8,
+        });
+        const subscriberErrorHandler = vi.fn();
         const coordinator = new AdaptiveQualityCoordinator(
-          new AdaptiveQualityController({ initialQuality: 0.8 }),
+          controller,
           stream,
           socket,
+          { subscriberErrorHandler },
         );
         return {
           destroy: () => coordinator.destroy(),
-          subscribeFailingListener: () => {
-            coordinator.subscribe(() => {
-              throw new Error("adaptive quality listener failed");
+          reset: () => coordinator.reset(),
+          subscribe: (listener) => coordinator.subscribe(listener),
+          subscriberErrorHandler,
+          failReset: (error) => {
+            vi.spyOn(controller, "reset").mockImplementationOnce(() => {
+              throw error;
             });
           },
           firstRelease: streamEvents.unsubscribe,
@@ -259,19 +276,25 @@ describe("resource lifecycle hardening", () => {
           getBufferedAmount: () => 0,
           subscribe: socketEvents.subscribe,
         };
+        const controller = new AdaptiveResolutionController();
+        const subscriberErrorHandler = vi.fn();
         const coordinator = new AdaptiveResolutionCoordinator(
-          new AdaptiveResolutionController(),
+          controller,
           new BandwidthEstimator(),
           stream,
           socket,
           0.45,
           () => 0,
+          { subscriberErrorHandler },
         );
         return {
           destroy: () => coordinator.destroy(),
-          subscribeFailingListener: () => {
-            coordinator.subscribe(() => {
-              throw new Error("adaptive resolution listener failed");
+          reset: () => coordinator.reset(),
+          subscribe: (listener) => coordinator.subscribe(listener),
+          subscriberErrorHandler,
+          failReset: (error) => {
+            vi.spyOn(controller, "reset").mockImplementationOnce(() => {
+              throw error;
             });
           },
           firstRelease: streamEvents.unsubscribe,
@@ -283,20 +306,58 @@ describe("resource lifecycle hardening", () => {
   ];
 
   it.each(coordinatorCases)(
+    "isolates subscriber failures for $name",
+    ({ create }) => {
+      const lifecycle = create();
+      const firstFailure = new Error("first adaptive listener failed");
+      const secondFailure = new Error("second adaptive listener failed");
+      const healthyListener = vi.fn();
+      const unsubscribeFirst = lifecycle.subscribe(() => {
+        throw firstFailure;
+      });
+      const unsubscribeHealthy = lifecycle.subscribe(healthyListener);
+      const unsubscribeSecond = lifecycle.subscribe(() => {
+        throw secondFailure;
+      });
+
+      expect(() => lifecycle.reset()).not.toThrow();
+      expect(healthyListener).toHaveBeenCalledOnce();
+      expect(lifecycle.subscriberErrorHandler).toHaveBeenCalledTimes(2);
+      expect(lifecycle.subscriberErrorHandler).toHaveBeenNthCalledWith(
+        1,
+        firstFailure,
+      );
+      expect(lifecycle.subscriberErrorHandler).toHaveBeenNthCalledWith(
+        2,
+        secondFailure,
+      );
+
+      unsubscribeFirst();
+      unsubscribeHealthy();
+      unsubscribeSecond();
+      expect(() => lifecycle.destroy()).not.toThrow();
+    },
+  );
+
+  it.each(coordinatorCases)(
     "finishes $name teardown after reset and unsubscribe failures",
     ({ create }) => {
       const lifecycle = create();
+      const resetFailure = new Error("reset failed");
       const unsubscribeFailure = new Error("unsubscribe failed");
+      lifecycle.failReset(resetFailure);
       lifecycle.firstRelease.mockImplementationOnce(() => {
         throw unsubscribeFailure;
       });
-      lifecycle.subscribeFailingListener();
 
       const error = captureCleanupError(lifecycle.destroy);
 
-      expect(error.failures.map(({ operation }) => operation)).toEqual([
-        "controller.reset",
-        lifecycle.firstReleaseOperation,
+      expect(error.failures).toEqual([
+        { operation: "controller.reset", error: resetFailure },
+        {
+          operation: lifecycle.firstReleaseOperation,
+          error: unsubscribeFailure,
+        },
       ]);
       expect(lifecycle.firstRelease).toHaveBeenCalledOnce();
       expect(lifecycle.secondRelease).toHaveBeenCalledOnce();
