@@ -642,6 +642,30 @@ class MouseCompositionTests(SimpleTestCase):
                 platform_name="nt",
             )
 
+    def test_injected_active_windows_output_is_safe_on_non_windows(self) -> None:
+        api = FakeCursorApi()
+        lease = WindowsCursorOwnershipLease()
+        dependencies = build_mouse_runtime_dependencies(
+            GestureMouseRuntimeConfig(
+                enabled=True,
+                output_mode=GestureMouseOutputMode.WINDOWS,
+            ),
+            owner_id="injected-posix",
+            cursor_api=api,
+            ownership_lease=lease,
+            platform_name="posix",
+        )
+
+        result = dependencies.coordinator.process(
+            selected_hand(), timestamp_ms=0, stable_gesture=GestureId.POINT
+        )
+
+        self.assertTrue(result.moved)
+        self.assertTrue(api.moves)
+        self.assertEqual(lease.owner_id, "injected-posix")
+        dependencies.coordinator.close()
+        self.assertIsNone(lease.owner_id)
+
     def test_button_only_windows_output_forwards_the_exact_lease(self) -> None:
         lease = WindowsCursorOwnershipLease()
         captured: dict[str, object] = {}

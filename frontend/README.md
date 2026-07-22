@@ -1,7 +1,7 @@
 # GestureBoard Pro frontend
 
-Sprint 2 Alpha 4 adds deterministic WebSocket recovery to camera streaming and
-optional annotated JPEG feedback. Sprint 2 is not yet complete.
+The frontend provides deterministic WebSocket recovery, camera streaming, and
+optional annotated JPEG feedback through the backend ASGI runtime.
 
 ## Recognition diagnostics (Alpha 9)
 
@@ -55,8 +55,8 @@ nor the WebSocket: stopping streaming does not stop or disconnect either.
 Camera access requires HTTPS outside localhost and a browser that supports
 `navigator.mediaDevices.getUserMedia`. On page shutdown, the app stops the
 stream scheduler, stops camera tracks, then disconnects the client. The current
-backend processes binary frames sequentially; no annotated-frame return stream
-is implemented in this Alpha.
+backend processes binary frames sequentially and returns optional correlated
+annotated GBF1 JPEG feedback when enabled.
 
 ## Server frame scheduling
 
@@ -227,6 +227,13 @@ this application's send path.
 Vitest runs in JSDOM. Camera, media stream, canvas, scheduler, clock, encoder,
 and WebSocket tests inject fakes; no test starts a server, requests a real
 camera, renders a native canvas, waits on wall-clock time, or accesses a network.
+
+The repository also has a deterministic local-loopback acceptance path using
+the real frontend WebSocket client and Django ASGI endpoint:
+
+```powershell
+node scripts/run-alpha7-integrated-runtime-acceptance.mjs
+```
 
 ## Development endpoint override
 
