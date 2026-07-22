@@ -9,7 +9,7 @@ const python =
   (process.platform === "win32"
     ? path.join(root, ".venv", "Scripts", "python.exe")
     : "python3");
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const vitest = path.join(root, "frontend", "node_modules", "vitest", "vitest.mjs");
 const host = "127.0.0.1";
 const timeoutMs = 15_000;
 
@@ -84,12 +84,11 @@ process.once("SIGTERM", () => void stop(143));
 try {
   await waitForListening(port);
   const test = spawn(
-    npm,
-    ["run", "test:run", "--", "tests/integrated-runtime.acceptance.test.ts"],
+    process.execPath,
+    [vitest, "run", "tests/integrated-runtime.acceptance.test.ts"],
     {
       cwd: path.join(root, "frontend"),
       stdio: "inherit",
-      shell: process.platform === "win32",
       env: {
         ...process.env,
         GESTUREBOARD_ACCEPTANCE_WS_URL: `ws://${host}:${port}/ws/`,
