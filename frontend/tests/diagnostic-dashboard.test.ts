@@ -6,7 +6,11 @@ import {
   CameraState,
   type CameraController,
 } from "../src/camera";
-import { DiagnosticDashboard, type ObjectUrlApi } from "../src/dashboard";
+import {
+  AnnotationCorrelation,
+  DiagnosticDashboard,
+  type ObjectUrlApi,
+} from "../src/dashboard";
 import { RecognitionStateStore } from "../src/recognition";
 import {
   FrameStreamState,
@@ -574,6 +578,31 @@ describe("DiagnosticDashboard", () => {
 
     socket.remoteClose(1006, "duplicate");
     expect(revokeObjectURL).toHaveBeenCalledOnce();
+  });
+
+  it("destroys its internally owned annotation correlator once", () => {
+    const destroy = vi.spyOn(AnnotationCorrelation.prototype, "destroy");
+
+    dashboard.destroy();
+    dashboard.destroy();
+
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
+  it("resets but does not destroy an externally owned annotation correlator", () => {
+    dashboard.destroy();
+    const correlation = new AnnotationCorrelation();
+    const reset = vi.spyOn(correlation, "reset");
+    const destroy = vi.spyOn(correlation, "destroy");
+    dashboard = new DiagnosticDashboard(root, client, {
+      annotationCorrelation: correlation,
+    });
+
+    dashboard.destroy();
+    dashboard.destroy();
+
+    expect(reset).toHaveBeenCalledOnce();
+    expect(destroy).not.toHaveBeenCalled();
   });
 
   it("revokes the preview and unsubscribes idempotently on destruction", async () => {

@@ -111,6 +111,7 @@ export class DiagnosticDashboard {
   private annotationUrl: string | null = null;
   private readonly objectUrls: ObjectUrlApi;
   private readonly annotationCorrelation: AnnotationCorrelation;
+  private readonly ownsAnnotationCorrelation: boolean;
   private readonly handlesAnnotationEvents: boolean;
   private readonly unsubscribeAnnotationCorrelation: () => void;
   private destroyed = false;
@@ -126,10 +127,11 @@ export class DiagnosticDashboard {
     private readonly options: DiagnosticDashboardOptions = {},
   ) {
     this.cameraState = this.options.camera?.getState() ?? null;
+    this.ownsAnnotationCorrelation =
+      this.options.annotationCorrelation === undefined;
     this.annotationCorrelation =
       this.options.annotationCorrelation ?? new AnnotationCorrelation();
-    this.handlesAnnotationEvents =
-      this.options.annotationCorrelation === undefined;
+    this.handlesAnnotationEvents = this.ownsAnnotationCorrelation;
     this.objectUrls = this.options.objectUrls ?? URL;
     this.streamState = this.options.stream?.getState() ?? null;
     this.adaptiveSnapshot = this.options.adaptive?.getSnapshot() ?? null;
@@ -294,8 +296,13 @@ export class DiagnosticDashboard {
       ],
       ["camera.detach-preview", () => this.options.camera?.detachPreview()],
       [
-        "annotation-correlation.reset",
-        () => this.annotationCorrelation.reset(),
+        this.ownsAnnotationCorrelation
+          ? "annotation-correlation.destroy"
+          : "annotation-correlation.reset",
+        () =>
+          this.ownsAnnotationCorrelation
+            ? this.annotationCorrelation.destroy()
+            : this.annotationCorrelation.reset(),
       ],
       ["annotation.clear", () => this.clearAnnotation()],
       ["root.clear", () => this.root.replaceChildren()],

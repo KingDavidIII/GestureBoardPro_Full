@@ -8,6 +8,14 @@ export type AnnotationCorrelationUpdate =
   | { readonly kind: "clear" }
   | { readonly kind: "frame"; readonly frame: AnnotatedFrameMessage };
 
+export type AnnotationCorrelationListener = (
+  update: AnnotationCorrelationUpdate,
+) => void;
+
+export interface AnnotationCorrelationOptions {
+  readonly subscriberErrorHandler?: (error: unknown) => void;
+}
+
 const none = (): AnnotationCorrelationUpdate => ({ kind: "none" });
 
 /** Correlate one bounded pending result with one bounded pending binary frame. */
@@ -16,18 +24,25 @@ export class AnnotationCorrelation {
   private pendingFrame: AnnotatedFrameMessage | null = null;
   private presentedSequence: number | null = null;
   private lastAcceptedSequence: number | null = null;
-  private readonly listeners = new Set<
-    (update: AnnotationCorrelationUpdate) => void
-  >();
+  private readonly listeners = new Set<AnnotationCorrelationListener>();
+  private readonly subscriberErrorHandler: (error: unknown) => void;
+  private destroyed = false;
 
-  subscribe(
-    listener: (update: AnnotationCorrelationUpdate) => void,
-  ): () => void {
+  constructor(options: AnnotationCorrelationOptions = {}) {
+    this.subscriberErrorHandler =
+      options.subscriberErrorHandler ??
+      ((error) =>
+        console.error("Annotation correlation listener failed", error));
+  }
+
+  subscribe(listener: AnnotationCorrelationListener): () => void {
+    if (this.destroyed) return () => undefined;
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
   acceptResult(message: GestureResultMessage): AnnotationCorrelationUpdate {
+    if (this.destroyed) return none();
     const annotation = message.annotation;
     if (!annotation || !annotation.enabled || !annotation.available)
       return this.publish(this.clearPresentation());
@@ -42,6 +57,7 @@ export class AnnotationCorrelation {
   }
 
   acceptFrame(frame: AnnotatedFrameMessage): AnnotationCorrelationUpdate {
+    if (this.destroyed) return none();
     if (
       this.lastAcceptedSequence !== null &&
       frame.sequence <= this.lastAcceptedSequence
@@ -64,6 +80,7 @@ export class AnnotationCorrelation {
   }
 
   reset(): AnnotationCorrelationUpdate {
+    if (this.destroyed) return none();
     const hadPresentation = this.presentedSequence !== null;
     this.pendingMetadata = null;
     this.pendingFrame = null;
@@ -73,11 +90,22 @@ export class AnnotationCorrelation {
   }
 
   clearPresentation(): AnnotationCorrelationUpdate {
+    if (this.destroyed) return none();
     const hadPresentation = this.presentedSequence !== null;
     this.pendingMetadata = null;
     this.pendingFrame = null;
     this.presentedSequence = null;
     return hadPresentation ? { kind: "clear" } : none();
+  }
+
+  destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.pendingMetadata = null;
+    this.pendingFrame = null;
+    this.presentedSequence = null;
+    this.lastAcceptedSequence = null;
+    this.listeners.clear();
   }
 
   private correlate(): AnnotationCorrelationUpdate {
@@ -118,8 +146,15 @@ export class AnnotationCorrelation {
   private publish(
     update: AnnotationCorrelationUpdate,
   ): AnnotationCorrelationUpdate {
+    if (this.destroyed) return none();
     if (update.kind !== "none")
-      for (const listener of [...this.listeners]) listener(update);
+      for (const listener of [...this.listeners]) {
+        try {
+          listener(update);
+        } catch (error) {
+          this.subscriberErrorHandler(error);
+        }
+      }
     return update;
   }
 }
