@@ -8,6 +8,13 @@ versioned WebSocket interface with a browser diagnostic frontend.
 The classifier is rule-based, not machine-learning based. MediaPipe supplies
 hand landmarks; project-owned rules classify normalized landmark geometry.
 
+## Versioning
+
+The current GestureBoard Pro application release version is `0.2.0-alpha.1`.
+Backend runtime metadata and frontend package metadata should remain aligned.
+Protocol, API, schema, and envelope versions are independent compatibility
+versions and do not automatically follow the application release version.
+
 ## Requirements and setup
 
 - Python 3.11

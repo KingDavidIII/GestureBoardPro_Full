@@ -7,6 +7,8 @@ from django.contrib import admin
 from django.http import JsonResponse
 from django.urls import include, path
 
+from .version import APPLICATION_VERSION
+
 
 def health_check(request):
     """
@@ -21,7 +23,7 @@ def health_check(request):
         {
             "status": "ok",
             "project": "GestureBoard Pro",
-            "version": "0.1.0-alpha.1",
+            "version": APPLICATION_VERSION,
         }
     )
 
