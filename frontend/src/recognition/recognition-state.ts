@@ -19,6 +19,10 @@ export interface RecognitionState {
 }
 export type RecognitionStateListener = (snapshot: RecognitionState) => void;
 
+export interface RecognitionStateStoreOptions {
+  readonly subscriberErrorHandler?: (error: unknown) => void;
+}
+
 export const emptyRecognitionState = (epoch = 0): RecognitionState =>
   Object.freeze({
     availability: "unavailable",
@@ -44,16 +48,25 @@ const copy = (value: GestureRecognition): GestureRecognition =>
 export class RecognitionStateStore {
   private state: RecognitionState = emptyRecognitionState();
   private readonly listeners = new Set<RecognitionStateListener>();
+  private readonly subscriberErrorHandler: (error: unknown) => void;
   private destroyed = false;
+
+  constructor(options: RecognitionStateStoreOptions = {}) {
+    this.subscriberErrorHandler =
+      options.subscriberErrorHandler ??
+      ((error) => console.error("Recognition listener failed", error));
+  }
   getSnapshot(): RecognitionState {
     return this.state;
   }
   subscribe(listener: RecognitionStateListener): () => void {
-    if (!this.destroyed) this.listeners.add(listener);
+    if (this.destroyed) return () => undefined;
+    this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
   beginEpoch(epoch: number): void {
-    if (epoch >= this.state.epoch) this.publish(emptyRecognitionState(epoch));
+    if (this.destroyed || epoch < this.state.epoch) return;
+    this.publish(emptyRecognitionState(epoch));
   }
   setCapabilityAvailable(available: boolean, epoch: number): void {
     if (epoch !== this.state.epoch || this.destroyed) return;
@@ -140,11 +153,19 @@ export class RecognitionStateStore {
     this.applyRecognition(null, epoch);
   }
   destroy(): void {
+    if (this.destroyed) return;
     this.destroyed = true;
     this.listeners.clear();
   }
   private publish(state: RecognitionState): void {
+    if (this.destroyed) return;
     this.state = state;
-    for (const listener of [...this.listeners]) listener(state);
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(state);
+      } catch (error) {
+        this.subscriberErrorHandler(error);
+      }
+    }
   }
 }
