@@ -6,4 +6,5 @@ export type {
   RecognitionIntegrityState,
   RecognitionState,
   RecognitionStateListener,
+  RecognitionStateStoreOptions,
 } from "./recognition-state";

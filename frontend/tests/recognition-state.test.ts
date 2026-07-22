@@ -71,15 +71,50 @@ describe("RecognitionStateStore", () => {
     store.clear(4);
     expect(received).toEqual([4, 4]);
   });
-  it("destroys listeners without generating a transition", () => {
+  it("treats destruction as a terminal and idempotent lifecycle boundary", () => {
     const store = new RecognitionStateStore();
     const listener = vi.fn();
     store.subscribe(listener);
     store.beginEpoch(1);
+    store.setCapabilityAvailable(true, 1);
+    const terminalSnapshot = store.getSnapshot();
+
     store.destroy();
+    store.destroy();
+
+    const lateListener = vi.fn();
+    const unsubscribe = store.subscribe(lateListener);
+    store.beginEpoch(2);
+    store.setCapabilityAvailable(false, 1);
     store.applyRecognition(recognition(), 1);
-    expect(listener).toHaveBeenCalledTimes(1);
-    expect(store.getSnapshot().recognition).toBeNull();
+    store.clear(1);
+    unsubscribe();
+
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(lateListener).not.toHaveBeenCalled();
+    expect(store.getSnapshot()).toBe(terminalSnapshot);
+  });
+  it("isolates subscriber failures and reports every failed listener", () => {
+    const firstFailure = new Error("first recognition listener failed");
+    const secondFailure = new Error("second recognition listener failed");
+    const subscriberErrorHandler = vi.fn();
+    const healthyListener = vi.fn();
+    const store = new RecognitionStateStore({ subscriberErrorHandler });
+
+    store.subscribe(() => {
+      throw firstFailure;
+    });
+    store.subscribe(healthyListener);
+    store.subscribe(() => {
+      throw secondFailure;
+    });
+
+    expect(() => store.beginEpoch(1)).not.toThrow();
+    expect(healthyListener).toHaveBeenCalledOnce();
+    expect(healthyListener).toHaveBeenCalledWith(store.getSnapshot());
+    expect(subscriberErrorHandler).toHaveBeenCalledTimes(2);
+    expect(subscriberErrorHandler).toHaveBeenNthCalledWith(1, firstFailure);
+    expect(subscriberErrorHandler).toHaveBeenNthCalledWith(2, secondFailure);
   });
   it("keeps no-hand, stable, and transition payloads immutable", () => {
     const store = new RecognitionStateStore();
