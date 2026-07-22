@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createRecognitionEventComposition } from "../src/application/application-composition";
+import { AnnotationCorrelation } from "../src/dashboard";
 import type { GestureRecognition } from "../src/protocol/messages";
 import { RecognitionStateStore } from "../src/recognition";
 import { FrameStreamState } from "../src/streaming";
@@ -176,6 +177,103 @@ describe("recognition application composition", () => {
       recognition: { frame_sequence: 1 },
       lastAcceptedFrameSequence: 1,
     });
+  });
+  it("treats runtime reset acknowledgement as a fresh recognition and annotation epoch", () => {
+    const store = new RecognitionStateStore();
+    const correlation = new AnnotationCorrelation();
+    const updates: string[] = [];
+    correlation.subscribe((update) => updates.push(update.kind));
+    const composition = createRecognitionEventComposition(store, correlation);
+    const annotated = {
+      ...gestureResult({ ...recognition, frame_sequence: 5 }),
+      annotation: {
+        enabled: true,
+        available: true,
+        format: "jpeg" as const,
+        envelope_version: 1,
+        sequence: 0,
+        width: 2,
+        height: 1,
+        byte_length: 3,
+      },
+    };
+    const frame = {
+      sequence: 0,
+      width: 2,
+      height: 1,
+      size: 3,
+      mimeType: "image/jpeg" as const,
+      blob: new Blob([new Uint8Array([1, 2, 3])], { type: "image/jpeg" }),
+    };
+    composition.handleSocketEvent({
+      type: "protocol.message",
+      message: annotated,
+    });
+    composition.handleSocketEvent({ type: "annotated-frame", frame });
+    expect(store.getSnapshot()).toMatchObject({
+      epoch: 0,
+      recognition: { frame_sequence: 5 },
+    });
+    expect(updates).toEqual(["frame"]);
+
+    composition.handleSocketEvent({
+      type: "protocol.message",
+      message: {
+        protocol_version: 1,
+        type: "runtime.reset.ack",
+        request_id: "reset",
+      },
+    });
+    expect(store.getSnapshot()).toMatchObject({
+      epoch: 1,
+      recognition: null,
+      lastAcceptedFrameSequence: null,
+    });
+    expect(updates).toEqual(["frame", "clear"]);
+
+    composition.handleSocketEvent({
+      type: "protocol.message",
+      message: {
+        ...annotated,
+        recognition: { ...recognition, frame_sequence: 0 },
+      },
+    });
+    composition.handleSocketEvent({ type: "annotated-frame", frame });
+    expect(store.getSnapshot()).toMatchObject({
+      epoch: 1,
+      recognition: { frame_sequence: 0 },
+    });
+    expect(updates).toEqual(["frame", "clear", "frame"]);
+  });
+  it("does not create an epoch for unrelated acknowledgements and ignores events after destruction", () => {
+    const store = new RecognitionStateStore();
+    const correlation = {
+      acceptResult: vi.fn(),
+      acceptFrame: vi.fn(),
+      reset: vi.fn(),
+    };
+    const composition = createRecognitionEventComposition(store, correlation);
+    composition.handleSocketEvent({
+      type: "protocol.message",
+      message: { protocol_version: 1, type: "pong", request_id: "ping" },
+    });
+    composition.handleSocketEvent({
+      type: "protocol.message",
+      message: {
+        protocol_version: 1,
+        type: "annotated_frame.set.ack",
+        enabled: true,
+      },
+    });
+    expect(store.getSnapshot().epoch).toBe(0);
+    expect(correlation.reset).not.toHaveBeenCalled();
+    composition.destroy();
+    composition.handleSocketEvent({
+      type: "protocol.message",
+      message: { protocol_version: 1, type: "runtime.reset.ack" },
+    });
+    expect(store.getSnapshot().epoch).toBe(0);
+    expect(correlation.reset).not.toHaveBeenCalled();
   });
   it("accepts unadvertised recognition without changing capability availability", () => {
     const store = new RecognitionStateStore();

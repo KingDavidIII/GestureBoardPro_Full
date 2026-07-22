@@ -29,7 +29,10 @@ export function createRecognitionEventComposition(
         recognition.beginEpoch(++epoch);
         annotationCorrelation?.reset();
       } else if (event.type === "protocol.message") {
-        if (event.message.type === "connection.ready")
+        if (event.message.type === "runtime.reset.ack") {
+          recognition.beginEpoch(++epoch);
+          annotationCorrelation?.reset();
+        } else if (event.message.type === "connection.ready")
           recognition.setCapabilityAvailable(
             event.message.capabilities?.includes("gesture.recognition.v1") ??
               false,

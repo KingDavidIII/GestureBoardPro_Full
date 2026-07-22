@@ -373,6 +373,34 @@ describe("GestureWebSocketClient", () => {
     });
   });
 
+  it("accepts a restarted annotated-frame sequence after runtime reset acknowledgement", async () => {
+    const [client, socket] = createClient();
+    const sequences: number[] = [];
+    client.subscribe((event) => {
+      if (event.type === "annotated-frame")
+        sequences.push(event.frame.sequence);
+    });
+    await connectClient(client, socket);
+
+    socket.message(createAnnotatedEnvelope(2));
+    await Promise.resolve();
+    expect(client.getLatestAnnotatedFrame()).toMatchObject({ sequence: 2 });
+
+    socket.message(
+      '{"protocol_version":1,"type":"runtime.reset.ack","request_id":"reset"}',
+    );
+    expect(client.getLatestAnnotatedFrame()).toBeNull();
+
+    socket.message(createAnnotatedEnvelope(0));
+    await Promise.resolve();
+    socket.message(createAnnotatedEnvelope(0));
+    socket.message(createAnnotatedEnvelope(1));
+    await Promise.resolve();
+
+    expect(sequences).toEqual([2, 0, 1]);
+    expect(client.getLatestAnnotatedFrame()).toMatchObject({ sequence: 1 });
+  });
+
   it("isolates failing annotation subscribers and clears state on remote close", async () => {
     const consoleError = vi
       .spyOn(console, "error")

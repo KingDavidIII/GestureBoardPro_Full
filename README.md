@@ -3,7 +3,7 @@
 GestureBoard Pro is a Python/Django gesture-recognition backend that turns
 encoded hand-image frames into deterministic, explicitly configured keyboard
 actions. Sprint 1 provides the complete synchronous backend pipeline and a
-versioned WebSocket interface. The frontend is not yet complete.
+versioned WebSocket interface with a browser diagnostic frontend.
 
 The classifier is rule-based, not machine-learning based. MediaPipe supplies
 hand landmarks; project-owned rules classify normalized landmark geometry.
@@ -53,8 +53,9 @@ python -m pre_commit run --all-files
 ## WebSocket protocol
 
 Connect to `ws://127.0.0.1:8000/ws/`. Protocol version 1 accepts encoded JPEG
-or PNG images as binary WebSocket messages. It returns metadata-only
-`gesture.result` messages; annotated frames and landmarks are not transported.
+or PNG images as binary WebSocket messages. It returns `gesture.result` JSON
+messages and optional correlated annotated GBF1 JPEG frames; landmarks are not
+transported.
 
 Text control messages are JSON:
 
@@ -117,8 +118,8 @@ See [Sprint 1 architecture](docs/sprint1-architecture.md) and
   persistent spatial tracking and may change after occlusion or reindexing.
 - Frames are processed sequentially per connection without frame dropping or a
   backpressure queue.
-- Annotated frames are retained internally but not streamed to WebSocket
-  clients.
+- Run the deterministic loopback acceptance path with
+  `node scripts/run-alpha7-integrated-runtime-acceptance.mjs`.
 - Camera capture and the incomplete frontend remain outside the WebSocket
   consumer.
 # Alpha 9.1 gesture recognition

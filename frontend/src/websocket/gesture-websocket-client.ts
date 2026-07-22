@@ -316,6 +316,8 @@ export class GestureWebSocketClient {
       this.lastMessage = message;
       if (message.type === "annotated_frame.set.ack")
         this.annotatedFramesEnabled = message.enabled;
+      else if (message.type === "runtime.reset.ack")
+        this.resetAnnotatedFrameState();
       this.emit(
         Object.freeze({
           type: "protocol.message" as const,
@@ -448,6 +450,10 @@ export class GestureWebSocketClient {
 
   private resetConnectionEpoch(): void {
     this.annotatedFramesEnabled = false;
+    this.resetAnnotatedFrameState();
+  }
+
+  private resetAnnotatedFrameState(): void {
     this.latestAnnotatedFrame = null;
   }
 
