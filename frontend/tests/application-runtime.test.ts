@@ -57,6 +57,7 @@ const resources = (order: string[]) => {
     recognitionUnsubscribe: operation("recognition.unsubscribe"),
     streamRecognitionUnsubscribe: operation("stream-recognition.unsubscribe"),
     recognitionComposition: operation("recognition-composition.destroy"),
+    annotationCorrelation: operation("annotation-correlation.destroy"),
     adaptive: operation("adaptive-stream.destroy"),
     adaptiveQuality: operation("adaptive-quality.destroy"),
     adaptiveResolution: operation("adaptive-resolution.destroy"),
@@ -70,6 +71,9 @@ const resources = (order: string[]) => {
     streamRecognitionUnsubscribe: operations.streamRecognitionUnsubscribe,
     recognitionComposition: {
       destroy: operations.recognitionComposition,
+    },
+    annotationCorrelation: {
+      destroy: operations.annotationCorrelation,
     },
     adaptive: { destroy: operations.adaptive },
     adaptiveQuality: { destroy: operations.adaptiveQuality },
@@ -105,6 +109,7 @@ describe("ApplicationRuntime", () => {
       "recognition.unsubscribe",
       "stream-recognition.unsubscribe",
       "recognition-composition.destroy",
+      "annotation-correlation.destroy",
       "adaptive-stream.destroy",
       "adaptive-quality.destroy",
       "adaptive-resolution.destroy",

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { AnnotationCorrelation } from "../src/dashboard";
 import type { AnnotatedFrameMessage } from "../src/protocol";
@@ -154,7 +154,7 @@ describe("AnnotationCorrelation", () => {
     },
   );
 
-  it("clears pending correlation state at epoch boundaries and destroy cleanup", () => {
+  it("clears pending and presented state at epoch boundaries", () => {
     const correlation = new AnnotationCorrelation();
     correlation.acceptFrame(frame(8));
     expect(correlation.reset()).toEqual({ kind: "none" });
@@ -164,5 +164,55 @@ describe("AnnotationCorrelation", () => {
     correlation.acceptResult(result(9, available(9)));
     correlation.acceptFrame(frame(9));
     expect(correlation.reset()).toEqual({ kind: "clear" });
+  });
+
+  it("isolates subscriber failures without interrupting later listeners", () => {
+    const firstFailure = new Error("first annotation listener failed");
+    const secondFailure = new Error("second annotation listener failed");
+    const subscriberErrorHandler = vi.fn();
+    const healthyListener = vi.fn();
+    const correlation = new AnnotationCorrelation({ subscriberErrorHandler });
+
+    correlation.subscribe(() => {
+      throw firstFailure;
+    });
+    correlation.subscribe(() => {
+      throw secondFailure;
+    });
+    correlation.subscribe(healthyListener);
+
+    correlation.acceptResult(result(4, available(4)));
+    const update = correlation.acceptFrame(frame(4));
+
+    expect(subscriberErrorHandler.mock.calls).toEqual([
+      [firstFailure],
+      [secondFailure],
+    ]);
+    expect(healthyListener).toHaveBeenCalledOnce();
+    expect(healthyListener).toHaveBeenCalledWith(update);
+  });
+
+  it("makes destruction terminal and rejects late subscriptions", () => {
+    const listener = vi.fn();
+    const lateListener = vi.fn();
+    const correlation = new AnnotationCorrelation();
+    correlation.subscribe(listener);
+    correlation.acceptResult(result(4, available(4)));
+    correlation.acceptFrame(frame(4));
+    expect(listener).toHaveBeenCalledOnce();
+
+    correlation.destroy();
+    correlation.destroy();
+    const unsubscribe = correlation.subscribe(lateListener);
+
+    expect(correlation.acceptResult(result(5, available(5)))).toEqual({
+      kind: "none",
+    });
+    expect(correlation.acceptFrame(frame(5))).toEqual({ kind: "none" });
+    expect(correlation.reset()).toEqual({ kind: "none" });
+    expect(correlation.clearPresentation()).toEqual({ kind: "none" });
+    expect(() => unsubscribe()).not.toThrow();
+    expect(listener).toHaveBeenCalledOnce();
+    expect(lateListener).not.toHaveBeenCalled();
   });
 });

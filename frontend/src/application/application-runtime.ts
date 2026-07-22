@@ -35,6 +35,7 @@ export interface ApplicationRuntimeResources {
   readonly recognitionUnsubscribe: () => void;
   readonly streamRecognitionUnsubscribe: () => void;
   readonly recognitionComposition: Destroyable;
+  readonly annotationCorrelation: Destroyable;
   readonly adaptive: Destroyable;
   readonly adaptiveQuality: Destroyable;
   readonly adaptiveResolution: Destroyable;
@@ -209,6 +210,10 @@ export class ApplicationRuntime {
         "recognition-composition.destroy",
         () => this.resources.recognitionComposition.destroy(),
       ],
+      [
+        "annotation-correlation.destroy",
+        () => this.resources.annotationCorrelation.destroy(),
+      ],
       ["adaptive-stream.destroy", () => this.resources.adaptive.destroy()],
       [
         "adaptive-quality.destroy",
@@ -238,6 +243,9 @@ const createDefaultApplicationRuntimeResources: ApplicationRuntimeResourceFactor
 
     const recognition = new RecognitionStateStore();
     const annotationCorrelation = new AnnotationCorrelation();
+    cleanup.register("annotation-correlation.destroy", () =>
+      annotationCorrelation.destroy(),
+    );
     const recognitionComposition = createRecognitionEventComposition(
       recognition,
       annotationCorrelation,
@@ -311,6 +319,7 @@ const createDefaultApplicationRuntimeResources: ApplicationRuntimeResourceFactor
       recognitionUnsubscribe,
       streamRecognitionUnsubscribe,
       recognitionComposition,
+      annotationCorrelation,
       adaptive,
       adaptiveQuality,
       adaptiveResolution,
