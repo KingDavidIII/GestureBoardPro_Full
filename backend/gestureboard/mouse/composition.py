@@ -71,7 +71,25 @@ def build_mouse_runtime_dependencies(
         and config.button_policy.buttons_enabled
         and config.button_output_mode is MouseButtonOutputMode.WINDOWS
     )
-    if requests_windows_output and platform != "nt":
+    uses_injected_active_native_outputs = active_native_output and (
+        (
+            config.output_mode is not GestureMouseOutputMode.WINDOWS
+            or cursor_api is not None
+        )
+        and (
+            not config.button_policy.buttons_enabled
+            or config.button_output_mode is not MouseButtonOutputMode.WINDOWS
+            or button_api is not None
+        )
+    )
+    permits_injected_non_windows_outputs = (
+        platform != "nt" and uses_injected_active_native_outputs
+    )
+    if (
+        requests_windows_output
+        and platform != "nt"
+        and not permits_injected_non_windows_outputs
+    ):
         raise MouseOutputError("Windows mouse output is unavailable on this platform.")
     if active_native_output and ownership_lease is None:
         raise MouseOutputError("Native mouse output requires a shared ownership lease.")
@@ -79,13 +97,17 @@ def build_mouse_runtime_dependencies(
     cursor_output: VirtualCursorOutputPort = NullVirtualCursorOutput()
     button_output: MouseButtonOutputPort = NullMouseButtonOutput()
     lease = ownership_lease if active_native_output else None
-    if lease is not None:
+    if lease is not None and not permits_injected_non_windows_outputs:
         lease.enable_cross_process(mutex_factory)
     try:
         if config.enabled and config.output_mode is GestureMouseOutputMode.WINDOWS:
             api = cursor_api if cursor_api is not None else create_windows_cursor_api()
             cursor_output = cursor_output_factory(
-                WindowsDesktopBounds.from_windows_api(api), api, platform_name=platform
+                WindowsDesktopBounds.from_windows_api(api),
+                api,
+                platform_name=(
+                    "nt" if permits_injected_non_windows_outputs else platform
+                ),
             )
         if (
             config.enabled
@@ -97,7 +119,12 @@ def build_mouse_runtime_dependencies(
                 if button_api is not None
                 else create_windows_mouse_button_api()
             )
-            button_output = button_output_factory(api, platform_name=platform)
+            button_output = button_output_factory(
+                api,
+                platform_name=(
+                    "nt" if permits_injected_non_windows_outputs else platform
+                ),
+            )
         coordinator = coordinator_factory(
             owner_id,
             enabled=config.enabled,
