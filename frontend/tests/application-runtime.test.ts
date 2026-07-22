@@ -62,7 +62,7 @@ const resources = (order: string[]) => {
     adaptiveQuality: operation("adaptive-quality.destroy"),
     adaptiveResolution: operation("adaptive-resolution.destroy"),
     stream: operation("stream.destroy"),
-    camera: operation("camera.stop"),
+    camera: operation("camera.destroy"),
     client: operation("client.destroy"),
   };
   const value: ApplicationRuntimeResources = {
@@ -79,7 +79,7 @@ const resources = (order: string[]) => {
     adaptiveQuality: { destroy: operations.adaptiveQuality },
     adaptiveResolution: { destroy: operations.adaptiveResolution },
     stream: { destroy: operations.stream },
-    camera: { stop: operations.camera },
+    camera: { destroy: operations.camera },
     client: { destroy: operations.client },
   };
 
@@ -114,7 +114,7 @@ describe("ApplicationRuntime", () => {
       "adaptive-quality.destroy",
       "adaptive-resolution.destroy",
       "stream.destroy",
-      "camera.stop",
+      "camera.destroy",
       "client.destroy",
     ]);
 
