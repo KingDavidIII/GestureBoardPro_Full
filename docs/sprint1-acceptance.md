@@ -85,11 +85,27 @@ mapping.
 - Per-connection runtime isolation, reset, error, and cleanup contracts pass.
 - Production requires an explicit secret key.
 
+## Current capability updates after Sprint 1
+
+The version-1 WebSocket protocol now supports optional annotated-frame
+feedback. JSON control and event messages retain `protocol_version: 1`; GBF1
+is the separate binary JPEG envelope, not a protocol-v2 replacement. A server
+advertises `annotated_frame.jpeg.v1` in `connection.ready`; a client requests
+feedback with `annotated_frame.set` and waits for its acknowledgement. When
+enabled and available, `gesture.result` carries annotation metadata and is
+followed by a correlated GBF1 binary JPEG envelope with the same sequence.
+
+The frontend validates and decodes GBF1, then correlates it with the JSON
+metadata before presenting it. Runtime-reset acknowledgements and reconnect
+state changes begin a new frontend recognition/annotation epoch, so prior
+sequence and presentation state is not reused after reset or reconnection.
+
 ## Known limitations
 
 - Metadata identity is not persistent spatial hand tracking.
-- Per-connection processing is sequential and does not drop frames.
-- Annotated images are not returned through protocol version 1.
+- Sprint 1 processing was sequential and did not drop frames. The current
+  latest-frame scheduler remains sequential per connection but may replace a
+  pending frame with a newer submission under backpressure.
 - The default action mapping is empty; keyboard behavior requires deliberate
   configuration.
 - The frontend and live camera UX are not Sprint 1 acceptance deliverables.
