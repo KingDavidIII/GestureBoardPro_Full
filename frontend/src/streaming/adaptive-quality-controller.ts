@@ -300,8 +300,13 @@ export type AdaptiveQualityListener = (
   snapshot: AdaptiveQualitySnapshot,
 ) => void;
 
+export interface AdaptiveQualityCoordinatorOptions {
+  readonly subscriberErrorHandler?: (error: unknown) => void;
+}
+
 export class AdaptiveQualityCoordinator {
   private readonly listeners = new Set<AdaptiveQualityListener>();
+  private readonly subscriberErrorHandler: (error: unknown) => void;
   private latest: AdaptiveQualityDecision | null = null;
   private destroyed = false;
   private applying = false;
@@ -311,7 +316,11 @@ export class AdaptiveQualityCoordinator {
     readonly controller: AdaptiveQualityController,
     private readonly stream: QualityAdaptiveStream,
     private readonly socket: QualitySocketSource,
+    options: AdaptiveQualityCoordinatorOptions = {},
   ) {
+    this.subscriberErrorHandler =
+      options.subscriberErrorHandler ??
+      ((error) => console.error("Adaptive quality listener failed", error));
     this.unsubscribeStream = stream.subscribe((event) =>
       this.handleStream(event),
     );
@@ -419,6 +428,12 @@ export class AdaptiveQualityCoordinator {
   }
   private publish(): void {
     const snapshot = this.getSnapshot();
-    for (const listener of [...this.listeners]) listener(snapshot);
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(snapshot);
+      } catch (error) {
+        this.subscriberErrorHandler(error);
+      }
+    }
   }
 }

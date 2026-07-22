@@ -336,8 +336,13 @@ export interface ResolutionSocketSource {
 export type AdaptiveResolutionListener = (
   snapshot: AdaptiveResolutionSnapshot,
 ) => void;
+
+export interface AdaptiveResolutionCoordinatorOptions {
+  readonly subscriberErrorHandler?: (error: unknown) => void;
+}
 export class AdaptiveResolutionCoordinator {
   private readonly listeners = new Set<AdaptiveResolutionListener>();
+  private readonly subscriberErrorHandler: (error: unknown) => void;
   private readonly unsubscribeStream: () => void;
   private readonly unsubscribeSocket: () => void;
   private latest: AdaptiveResolutionDecision | null = null;
@@ -351,7 +356,11 @@ export class AdaptiveResolutionCoordinator {
     private readonly socket: ResolutionSocketSource,
     private readonly minimumQuality: number,
     private readonly now: () => number = () => performance.now(),
+    options: AdaptiveResolutionCoordinatorOptions = {},
   ) {
+    this.subscriberErrorHandler =
+      options.subscriberErrorHandler ??
+      ((error) => console.error("Adaptive resolution listener failed", error));
     this.estimate = estimator.getState();
     this.unsubscribeStream = stream.subscribe((event) =>
       this.handleStream(event),
@@ -509,6 +518,12 @@ export class AdaptiveResolutionCoordinator {
   }
   private publish(): void {
     const snapshot = this.getSnapshot();
-    for (const listener of [...this.listeners]) listener(snapshot);
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(snapshot);
+      } catch (error) {
+        this.subscriberErrorHandler(error);
+      }
+    }
   }
 }
