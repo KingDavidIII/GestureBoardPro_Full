@@ -117,14 +117,19 @@ deliberate application configuration that maps selected gesture labels to
 validated keyboard actions.
 
 See [Sprint 1 architecture](docs/sprint1-architecture.md) and
-[Sprint 1 acceptance](docs/sprint1-acceptance.md) for detailed contracts.
+[Sprint 1 acceptance](docs/sprint1-acceptance.md) for detailed contracts. See
+the [Alpha 7 closure record](docs/alpha7-closure.md) for the verified milestone
+status and validation evidence.
 
 ## Known limitations
 
 - Hand identity uses hand index plus normalized handedness metadata. It is not
   persistent spatial tracking and may change after occlusion or reindexing.
-- Frames are processed sequentially per connection without frame dropping or a
-  backpressure queue.
+- Each connection processes one active frame and retains at most one pending
+  frame. Under backpressure, a newer submission may replace the pending frame;
+  the replacement is counted as a dropped frame. Active processing is not
+  interrupted, and the bounded scheduler prioritizes recent input without an
+  unbounded queue.
 - Run the deterministic loopback acceptance path with
   `node scripts/run-alpha7-integrated-runtime-acceptance.mjs`.
 - Camera capture and the incomplete frontend remain outside the WebSocket
