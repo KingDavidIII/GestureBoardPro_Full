@@ -1,3 +1,4 @@
+import { releaseResourceOperations } from "../lifecycle/resource-cleanup";
 import {
   CameraError,
   CameraErrorCode,
@@ -40,6 +41,7 @@ export class CameraController {
   private preview: PreviewVideoElement | null = null;
   private metadata: CameraMetadata | null = null;
   private acquisitionEpoch = 0;
+  private destroyed = false;
 
   readonly preferredWidth: number;
   readonly preferredHeight: number;
@@ -74,6 +76,7 @@ export class CameraController {
   }
 
   async start(): Promise<CameraMetadata> {
+    this.assertNotDestroyed();
     if (
       this.state === CameraState.REQUESTING_PERMISSION ||
       this.state === CameraState.READY
@@ -144,6 +147,7 @@ export class CameraController {
   }
 
   async attachPreview(preview: PreviewVideoElement): Promise<void> {
+    this.assertNotDestroyed();
     this.preview = preview;
     const stream = this.stream;
     if (!stream) return;
@@ -186,7 +190,18 @@ export class CameraController {
     }
   }
 
+  destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    releaseResourceOperations("CameraController", [
+      ["listeners.clear", () => this.listeners.clear()],
+      ["preview.detach", () => this.detachPreview()],
+      ["camera.stop", () => this.stopForDestroy()],
+    ]);
+  }
+
   subscribe(listener: CameraListener): () => void {
+    if (this.destroyed) return () => undefined;
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
@@ -202,6 +217,19 @@ export class CameraController {
   }
   getPreview(): PreviewVideoElement | null {
     return this.preview;
+  }
+
+  private assertNotDestroyed(): void {
+    if (this.destroyed)
+      throw this.error(
+        CameraErrorCode.INVALID_STATE,
+        "Camera controller has been destroyed.",
+      );
+  }
+
+  private stopForDestroy(): void {
+    this.stop();
+    if (this.state === CameraState.IDLE) this.setState(CameraState.STOPPED);
   }
 
   private async assignPreview(

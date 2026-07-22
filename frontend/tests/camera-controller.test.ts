@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { ResourceCleanupError } from "../src/lifecycle/resource-cleanup";
 import {
   CameraController,
   CameraErrorCode,
@@ -232,5 +233,122 @@ describe("CameraController", () => {
     expect(video.srcObject).toBeNull();
     expect(camera.getStream()).toBeNull();
     expect(camera.getState()).toBe(CameraState.ERROR);
+  });
+
+  it("destroys a ready camera terminally without retaining preview or listeners", async () => {
+    const mediaStream = stream();
+    const track = mediaStream.getTracks()[0] as MediaStreamTrack & {
+      stop: ReturnType<typeof vi.fn>;
+    };
+    const camera = new CameraController({
+      mediaDevices: { getUserMedia: vi.fn().mockResolvedValue(mediaStream) },
+    });
+    const video = preview();
+    const listener = vi.fn();
+
+    camera.subscribe(listener);
+    await camera.attachPreview(video);
+    await camera.start();
+    const eventCount = listener.mock.calls.length;
+
+    camera.destroy();
+    camera.destroy();
+
+    expect(track.stop).toHaveBeenCalledOnce();
+    expect(video.srcObject).toBeNull();
+    expect(camera.getPreview()).toBeNull();
+    expect(camera.getStream()).toBeNull();
+    expect(camera.getMetadata()).toBeNull();
+    expect(camera.getState()).toBe(CameraState.STOPPED);
+    expect(listener).toHaveBeenCalledTimes(eventCount);
+
+    const lateListener = vi.fn();
+    const lateUnsubscribe = camera.subscribe(lateListener);
+    camera.stop();
+    lateUnsubscribe();
+
+    expect(lateListener).not.toHaveBeenCalled();
+    await expect(camera.start()).rejects.toMatchObject({
+      code: CameraErrorCode.INVALID_STATE,
+      message: "Camera controller has been destroyed.",
+    });
+    await expect(camera.attachPreview(preview())).rejects.toMatchObject({
+      code: CameraErrorCode.INVALID_STATE,
+      message: "Camera controller has been destroyed.",
+    });
+    expect(camera.getPreview()).toBeNull();
+  });
+
+  it("cancels pending acquisition when destroyed and releases the late stream", async () => {
+    const request = deferred<MediaStream>();
+    const mediaStream = stream();
+    const track = mediaStream.getTracks()[0] as MediaStreamTrack & {
+      stop: ReturnType<typeof vi.fn>;
+    };
+    const camera = new CameraController({
+      mediaDevices: { getUserMedia: vi.fn(() => request.promise) },
+    });
+    const listener = vi.fn();
+    camera.subscribe(listener);
+
+    const starting = camera.start();
+    const cancelled = expect(starting).rejects.toMatchObject({
+      code: CameraErrorCode.CAMERA_START_CANCELLED,
+    });
+    expect(camera.getState()).toBe(CameraState.REQUESTING_PERMISSION);
+    const eventCount = listener.mock.calls.length;
+
+    camera.destroy();
+    request.resolve(mediaStream);
+    await cancelled;
+
+    expect(track.stop).toHaveBeenCalledOnce();
+    expect(camera.getStream()).toBeNull();
+    expect(camera.getMetadata()).toBeNull();
+    expect(camera.getPreview()).toBeNull();
+    expect(camera.getState()).toBe(CameraState.STOPPED);
+    expect(listener).toHaveBeenCalledTimes(eventCount);
+    expect(() => camera.destroy()).not.toThrow();
+  });
+
+  it("remains terminal when media-track release fails during destruction", async () => {
+    const mediaStream = stream();
+    const track = mediaStream.getTracks()[0] as MediaStreamTrack & {
+      stop: ReturnType<typeof vi.fn>;
+    };
+    const releaseFailure = new Error("track release failed");
+    track.stop.mockImplementationOnce(() => {
+      throw releaseFailure;
+    });
+    const camera = new CameraController({
+      mediaDevices: { getUserMedia: vi.fn().mockResolvedValue(mediaStream) },
+    });
+    const video = preview();
+    const listener = vi.fn();
+
+    camera.subscribe(listener);
+    await camera.attachPreview(video);
+    await camera.start();
+    const eventCount = listener.mock.calls.length;
+
+    let cleanupError: unknown;
+    try {
+      camera.destroy();
+    } catch (error) {
+      cleanupError = error;
+    }
+
+    expect(cleanupError).toBeInstanceOf(ResourceCleanupError);
+    expect((cleanupError as ResourceCleanupError).failures).toEqual([
+      { operation: "camera.stop", error: releaseFailure },
+    ]);
+    expect(track.stop).toHaveBeenCalledOnce();
+    expect(video.srcObject).toBeNull();
+    expect(camera.getPreview()).toBeNull();
+    expect(camera.getStream()).toBeNull();
+    expect(camera.getMetadata()).toBeNull();
+    expect(camera.getState()).toBe(CameraState.STOPPED);
+    expect(listener).toHaveBeenCalledTimes(eventCount);
+    expect(() => camera.destroy()).not.toThrow();
   });
 });

@@ -26,10 +26,6 @@ interface Destroyable {
   destroy(): void;
 }
 
-interface Stoppable {
-  stop(): void;
-}
-
 export interface ApplicationRuntimeResources {
   readonly dashboard: Destroyable;
   readonly recognitionUnsubscribe: () => void;
@@ -40,7 +36,7 @@ export interface ApplicationRuntimeResources {
   readonly adaptiveQuality: Destroyable;
   readonly adaptiveResolution: Destroyable;
   readonly stream: Destroyable;
-  readonly camera: Stoppable;
+  readonly camera: Destroyable;
   readonly client: Destroyable;
 }
 
@@ -224,7 +220,7 @@ export class ApplicationRuntime {
         () => this.resources.adaptiveResolution.destroy(),
       ],
       ["stream.destroy", () => this.resources.stream.destroy()],
-      ["camera.stop", () => this.resources.camera.stop()],
+      ["camera.destroy", () => this.resources.camera.destroy()],
       ["client.destroy", () => this.resources.client.destroy()],
     );
 
@@ -255,7 +251,7 @@ const createDefaultApplicationRuntimeResources: ApplicationRuntimeResourceFactor
     );
 
     const camera = new CameraController();
-    cleanup.register("camera.stop", () => camera.stop());
+    cleanup.register("camera.destroy", () => camera.destroy());
 
     const encoder = new CanvasFrameEncoder();
     const stream = new FrameStreamController(camera, encoder, client);
