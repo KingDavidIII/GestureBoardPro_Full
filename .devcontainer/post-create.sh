@@ -11,6 +11,21 @@ echo "Repository: ${ROOT_DIR}"
 cd "${ROOT_DIR}"
 
 echo "==> Installing Linux runtime dependencies"
+
+# GestureBoardPro uses npm, not the legacy Yarn APT repository.
+# Disable only active Yarn source files; ignore already-disabled files.
+for source_file in \
+    /etc/apt/sources.list.d/*.list \
+    /etc/apt/sources.list.d/*.sources
+do
+    [[ -f "${source_file}" ]] || continue
+
+    if sudo grep -q "dl.yarnpkg.com" "${source_file}"; then
+        echo "==> Disabling incompatible Yarn APT source: ${source_file}"
+        sudo mv "${source_file}" "${source_file}.disabled"
+    fi
+done
+
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
     libgl1 \
@@ -18,8 +33,35 @@ sudo apt-get install -y --no-install-recommends \
 
 echo "==> Preparing Python 3.11 environment"
 
+PYTHON_BIN="$(command -v python)"
+
+if [[ -z "${PYTHON_BIN}" ]]; then
+    echo "ERROR: Python is not available in the container."
+    exit 1
+fi
+
+"${PYTHON_BIN}" - <<'PYTHON_CHECK'
+import sys
+
+if sys.version_info[:2] != (3, 11):
+    raise SystemExit(
+        f"ERROR: GestureBoardPro requires Python 3.11; "
+        f"found {sys.version.split()[0]}"
+    )
+
+print(f"Using Python {sys.version.split()[0]}")
+PYTHON_CHECK
+
+# A failed venv creation may leave a partial directory behind.
+if [[ -d "${VENV_DIR}" && ! -x "${VENV_DIR}/bin/python" ]]; then
+    echo "==> Removing incomplete virtual environment"
+    rm -rf "${VENV_DIR}"
+fi
+
 if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
-    python3.11 -m venv "${VENV_DIR}"
+    # --copies avoids symlink problems that can occur with the
+    # /usr/local Python layout used by some Dev Container images.
+    "${PYTHON_BIN}" -m venv --copies "${VENV_DIR}"
 fi
 
 "${VENV_DIR}/bin/python" -m ensurepip --upgrade
